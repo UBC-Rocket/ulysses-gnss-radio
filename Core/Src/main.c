@@ -44,6 +44,7 @@
 /* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_tx;
+DMA_HandleTypeDef hdma_spi1_rx;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart5;
@@ -108,6 +109,8 @@ int main(void)
   radio_message_queue_t radio_message_queue;
   gps_sample_queue_t gps_sample_queue;
 
+  
+
 
   radio_message_queue_init(&radio_message_queue);
   gps_sample_queue_init(&gps_sample_queue);
@@ -121,7 +124,6 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-    
 
     /* USER CODE BEGIN 3 */
   }
@@ -340,6 +342,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
 
 }
 

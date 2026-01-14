@@ -12,8 +12,12 @@ extern SPI_HandleTypeDef hspi1;
 // Static handler instance
 static spi_handler_t spi_handler;
 
-// Buffer for type/status byte transmission
+// Buffer for type byte transmission
 static uint8_t tx_type_buffer[1];
+
+// Ping-pong RX buffers for receiving radio messages from FC
+static uint8_t rx_buffer_a[RX_BUFFER_SIZE];
+static uint8_t rx_buffer_b[RX_BUFFER_SIZE];
 
 // --------------------------------------------------------------------------
 // Internal helpers
@@ -27,23 +31,37 @@ static void deassert_data_ready(void) {
     HAL_GPIO_WritePin(DATA_READY_PORT, DATA_READY_PIN, GPIO_PIN_RESET);
 }
 
-static void arm_status_dma(void) {
-    tx_type_buffer[0] = (uint8_t)spi_handler.board_state;
-    HAL_SPI_Transmit_DMA(&hspi1, tx_type_buffer, 1);
+static void swap_ping_pong_buffers(void) {
+    uint8_t *temp = spi_handler.rx_active_buffer;
+    spi_handler.rx_active_buffer = spi_handler.rx_complete_buffer;
+    spi_handler.rx_complete_buffer = temp;
 }
 
-static void arm_type_dma(uint8_t type_byte) {
+static void arm_rx_dma(void) {
+    HAL_SPI_Receive_DMA(&hspi1, spi_handler.rx_active_buffer, RX_BUFFER_SIZE);
+}
+
+static void arm_tx_type_dma(uint8_t type_byte) {
     tx_type_buffer[0] = type_byte;
     HAL_SPI_Transmit_DMA(&hspi1, tx_type_buffer, 1);
 }
 
-static void arm_data_dma(uint8_t *data, uint16_t size) {
+static void arm_tx_data_dma(uint8_t *data, uint16_t size) {
     HAL_SPI_Transmit_DMA(&hspi1, data, size);
 }
 
-// Try to setup next data transaction from queues
+// Process received radio message and forward via callback
+static void process_rx_message(uint8_t *buffer) {
+    if (spi_handler.radio_tx_callback != NULL) {
+        // Forward the entire buffer to the radio TX callback
+        // The callback is responsible for UART transmission to radio module
+        spi_handler.radio_tx_callback(buffer, RX_BUFFER_SIZE);
+    }
+}
+
+// Try to setup next TX transaction from queues
 // Returns true if data was found and transaction was setup
-static bool setup_next_transaction(void) {
+static bool setup_next_tx_transaction(void) {
     // Priority: GPS first, then Radio
     
     // Check GPS queue
@@ -69,6 +87,14 @@ static bool setup_next_transaction(void) {
     return false;
 }
 
+static void pop_current_tx_message(void) {
+    if (spi_handler.current_transaction.data_type == SPI_DATA_GPS) {
+        gps_sample_queue_pop(spi_handler.gps_queue);
+    } else if (spi_handler.current_transaction.data_type == SPI_DATA_RADIO) {
+        radio_message_queue_pop(spi_handler.radio_queue);
+    }
+}
+
 // --------------------------------------------------------------------------
 // Public API
 // --------------------------------------------------------------------------
@@ -82,73 +108,98 @@ void init_spi_handler(radio_message_queue_t *radio_queue, gps_sample_queue_t *gp
     spi_handler.current_transaction.tx_buffer = NULL;
     spi_handler.current_transaction.tx_size = 0;
     
-    // Ensure data ready line is low initially
+    // Initialize ping-pong buffers
+    spi_handler.rx_active_buffer = rx_buffer_a;
+    spi_handler.rx_complete_buffer = rx_buffer_b;
+    
+    // No radio TX callback initially
+    spi_handler.radio_tx_callback = NULL;
+    
+    // Ensure data ready line is low (RX mode)
     deassert_data_ready();
     
-    // Arm DMA with status - always ready to respond
-    spi_handler.state = SPI_STATE_STATUS_ARMED;
-    arm_status_dma();
+    // Start in IDLE state with RX DMA armed
+    spi_handler.state = SPI_STATE_IDLE;
+    arm_rx_dma();
 }
 
 void spi_handler_set_board_state(board_state_t state) {
     spi_handler.board_state = state;
 }
 
+void spi_handler_set_radio_tx_callback(radio_tx_callback_t callback) {
+    spi_handler.radio_tx_callback = callback;
+}
+
 void tick_spi_handler(void) {
-    // Only preempt when armed with status (no data was ready)
-    if (spi_handler.state != SPI_STATE_STATUS_ARMED) {
+    // Only transition from IDLE when data is available
+    if (spi_handler.state != SPI_STATE_IDLE) {
         return;
     }
     
-    // Check if data is now available
-    if (setup_next_transaction()) {
-        // Data available! Abort the status DMA and switch to type
+    // Check if data is available to send
+    if (setup_next_tx_transaction()) {
+        // Data available! Abort RX DMA and switch to TX mode
         HAL_SPI_Abort(&hspi1);
         
-        // Assert interrupt to signal FC
+        // Assert interrupt to signal FC we have data
         assert_data_ready();
         
-        // Arm DMA with type byte
-        spi_handler.state = SPI_STATE_TYPE_ARMED;
-        arm_type_dma((uint8_t)spi_handler.current_transaction.data_type);
+        // Arm TX DMA with type byte
+        spi_handler.state = SPI_STATE_TX_TYPE;
+        arm_tx_type_dma((uint8_t)spi_handler.current_transaction.data_type);
     }
-    // else: stay in STATUS_ARMED, DMA already armed with board state
+    // else: stay in IDLE, RX DMA already armed
 }
 
-void spi_dma_complete(void) {
+// Called from HAL_SPI_TxCpltCallback when TX DMA completes
+void spi_tx_complete(void) {
     switch (spi_handler.state) {
-        case SPI_STATE_STATUS_ARMED:
-            // FC polled us while no data ready
-            // Re-arm with current board state (may have changed)
-            arm_status_dma();
+        case SPI_STATE_TX_TYPE:
+            // FC read the type byte, now arm payload
+            spi_handler.state = SPI_STATE_TX_DATA;
+            arm_tx_data_dma(spi_handler.current_transaction.tx_buffer,
+                            spi_handler.current_transaction.tx_size);
             break;
             
-        case SPI_STATE_TYPE_ARMED:
-            // FC read the type byte, now arm for payload
-            spi_handler.state = SPI_STATE_DATA_ARMED;
-            arm_data_dma(spi_handler.current_transaction.tx_buffer,
-                         spi_handler.current_transaction.tx_size);
-            break;
-            
-        case SPI_STATE_DATA_ARMED:
+        case SPI_STATE_TX_DATA:
             // FC finished reading payload - pop from queue
-            if (spi_handler.current_transaction.data_type == SPI_DATA_GPS) {
-                gps_sample_queue_pop(spi_handler.gps_queue);
-            } else if (spi_handler.current_transaction.data_type == SPI_DATA_RADIO) {
-                radio_message_queue_pop(spi_handler.radio_queue);
-            }
+            pop_current_tx_message();
             
-            // Check for more data
-            if (setup_next_transaction()) {
-                // More data available - stay in type armed, keep INT high
-                spi_handler.state = SPI_STATE_TYPE_ARMED;
-                arm_type_dma((uint8_t)spi_handler.current_transaction.data_type);
+            // Check for more data to send
+            if (setup_next_tx_transaction()) {
+                // More data available - arm next type, keep INT high
+                spi_handler.state = SPI_STATE_TX_TYPE;
+                arm_tx_type_dma((uint8_t)spi_handler.current_transaction.data_type);
             } else {
-                // No more data - deassert INT and arm status
+                // No more data - deassert INT and return to IDLE (RX mode)
                 deassert_data_ready();
-                spi_handler.state = SPI_STATE_STATUS_ARMED;
-                arm_status_dma();
+                spi_handler.state = SPI_STATE_IDLE;
+                arm_rx_dma();
             }
+            break;
+            
+        case SPI_STATE_IDLE:
+            // Shouldn't happen - TX complete while in IDLE
             break;
     }
+}
+
+// Called from HAL_SPI_RxCpltCallback when RX DMA completes (255 bytes received)
+void spi_rx_complete(void) {
+    // RX complete should only happen in IDLE state
+    if (spi_handler.state != SPI_STATE_IDLE) {
+        // Unexpected RX complete - ignore or handle error
+        return;
+    }
+    
+    // FC just wrote 255 bytes to us (radio message)
+    // Swap ping-pong buffers so we can process the completed one
+    swap_ping_pong_buffers();
+    
+    // Process the received message (forward to radio via callback)
+    process_rx_message(spi_handler.rx_complete_buffer);
+    
+    // Re-arm RX DMA for next message
+    arm_rx_dma();
 }
