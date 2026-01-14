@@ -21,7 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "radio_queue.h"
+#include "gps_queue.h"
+#include "spi_slave.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -103,6 +105,14 @@ int main(void)
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
+  radio_message_queue_t radio_message_queue;
+  gps_sample_queue_t gps_sample_queue;
+
+
+  radio_message_queue_init(&radio_message_queue);
+  gps_sample_queue_init(&gps_sample_queue);
+
+  init_spi_handler(&radio_message_queue, &gps_sample_queue);
 
   /* USER CODE END 2 */
 
@@ -111,6 +121,7 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
+    
 
     /* USER CODE BEGIN 3 */
   }

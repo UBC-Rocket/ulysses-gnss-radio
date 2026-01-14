@@ -37,6 +37,15 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 
+typedef enum {
+    BOARD_STATE_IDLE = 0xFA,            // listening for radio messages, low rate GPS data intake
+    BOARD_STATE_RUNNING = 0xFB,         // full rate GPS data, radio active
+    BOARD_STATE_GPS_ERROR = 0xFC,       // GPS UART not responding or invalid data
+    BOARD_STATE_RADIO_ERROR = 0xFD,     // Radio UART not responding or invalid data
+    BOARD_STATE_QUEUE_OVERFLOW = 0xFE,  // data coming in faster than FC is reading
+    BOARD_STATE_ERROR = 0xFF            // unknown error occurred, may still be serving data
+} board_state_t;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
