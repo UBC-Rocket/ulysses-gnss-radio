@@ -34,6 +34,7 @@ Author: Ernie Han
 */
 
 #include "gps.h"
+#include "gps_queue.h"
 #include <stdbool.h>
 #include <string.h>
 
@@ -58,6 +59,9 @@ static volatile uint16_t s_tail = 0;
 static uint8_t s_line[GPS_NMEA_MAX];
 static uint16_t s_line_len = 0;
 static bool s_in_sentence = false;
+
+// queue variable to use to send through SPI when gps data is ready
+static gps_sample_queue_t s_gps_queue;
 
 static inline bool ring_empty(void) { return s_head == s_tail; }
 static inline bool ring_full(uint16_t head, uint16_t tail) {
@@ -125,103 +129,110 @@ static void build_complete_NMEA_sentence(uint8_t b) {
 
   s_line[s_line_len++] = b;
 
-  // sentence built, reset the flag
+  // sentence built, reset the flag + enqueue the NMEA sentence to the queue to
+  // be sent through SPI
   if (b == '\n') {
     if (s_out) {
       (void)HAL_UART_Transmit(s_out, s_line, s_line_len, 50);
+      gps_sample_enqueue(s_line, &s_gps_queue);
+
+      // TODO: would I have to dequeue somewhere after processing the NMEA \
     }
-    nmea_reset();
+      nmea_reset();
+    }
   }
-}
 
-// starts listening to uart6 for GPS data
-void gps_init(UART_HandleTypeDef *gps_uart, UART_HandleTypeDef *out_uart) {
-  s_gps = gps_uart;
-  s_out = out_uart;
+  // starts listening to uart6 for GPS data
+  void gps_init(UART_HandleTypeDef * gps_uart, UART_HandleTypeDef * out_uart) {
+    s_gps = gps_uart;
+    s_out = out_uart;
 
-  s_head = s_tail = 0;
-  nmea_reset();
+    s_head = s_tail = 0;
+    nmea_reset();
 
-  // OG code commendted out
-  // if (s_gps) {
-  //     (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
-  // }
+    // initialize queue
+    gps_sample_queue_init(&s_gps_queue);
 
-  /*
-  --------------------------------------TEST CODE
-  START--------------------------------------------
-  */
+    // OG code commendted out
+    // if (s_gps) {
+    //     (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
+    // }
 
-  s_hw_rx_enabled = (s_gps != NULL); // NEW
-  if (s_hw_rx_enabled) {
-    (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
+    /*
+    --------------------------------------TEST CODE
+    START--------------------------------------------
+    */
 
+    s_hw_rx_enabled = (s_gps != NULL); // NEW
+    if (s_hw_rx_enabled) {
+      (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
+
+      /*
+      --------------------------------------TEST CODE
+      END--------------------------------------------
+      */
+    }
+  }
+
+  // "main loop" that will process the circular buffer and build full NMEA
+  // sentence and send to UART1
+  void gps_process(void) {
+    uint8_t b;
+    while (ring_pop_main(&b)) {
+      build_complete_NMEA_sentence(b);
+    }
+  }
+
+  void gps_uart_rx_cplt_callback(UART_HandleTypeDef * huart) {
+    if (!s_gps || huart != s_gps)
+      return;
+
+    // push the received byte to the ring buffer
+    ring_push_isr(s_rx_byte);
+
+    // OG code commented out
+    //  rearm
+    //  (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
+
+    /*
+    --------------------------------------TEST CODE
+    START--------------------------------------------
+    */
+    if (s_hw_rx_enabled) { // NEW
+      (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
+    }
     /*
     --------------------------------------TEST CODE
     END--------------------------------------------
     */
   }
-}
 
-// "main loop" that will process the circular buffer and build full NMEA
-// sentence and send to UART1
-void gps_process(void) {
-  uint8_t b;
-  while (ring_pop_main(&b)) {
-    build_complete_NMEA_sentence(b);
+  // error handling
+  void gps_uart_error_callback(UART_HandleTypeDef * huart) {
+    if (!s_gps || huart != s_gps)
+      return;
+
+    // if something goes wrong, just try to rearm
+    (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
   }
-}
-
-void gps_uart_rx_cplt_callback(UART_HandleTypeDef *huart) {
-  if (!s_gps || huart != s_gps)
-    return;
-
-  // push the received byte to the ring buffer
-  ring_push_isr(s_rx_byte);
-
-  // OG code commented out
-  //  rearm
-  //  (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
 
   /*
   --------------------------------------TEST CODE
   START--------------------------------------------
   */
-  if (s_hw_rx_enabled) { // NEW
-    (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
+  void gps_sim_rx_byte(uint8_t b) {
+    // Pretend "UART RX ISR received b"
+    s_rx_byte = b;
+    ring_push_isr(b);
+    // (We intentionally do NOT call HAL_UART_Receive_IT here.)
+  }
+
+  void gps_sim_rx_stream(const uint8_t *data, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+      gps_sim_rx_byte(data[i]);
+    }
   }
   /*
   --------------------------------------TEST CODE
   END--------------------------------------------
   */
-}
-
-// error handling
-void gps_uart_error_callback(UART_HandleTypeDef *huart) {
-  if (!s_gps || huart != s_gps)
-    return;
-
-  // if something goes wrong, just try to rearm
-  (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
-}
-
-/*
---------------------------------------TEST CODE
-START--------------------------------------------
-*/
-void gps_sim_rx_byte(uint8_t b) {
-  // Pretend "UART RX ISR received b"
-  s_rx_byte = b;
-  ring_push_isr(b);
-  // (We intentionally do NOT call HAL_UART_Receive_IT here.)
-}
-
-void gps_sim_rx_stream(const uint8_t *data, size_t n) {
-  for (size_t i = 0; i < n; i++) {
-    gps_sim_rx_byte(data[i]);
-  }
-}
-/*
---------------------------------------TEST CODE
-END--------------------------------------------
-*/
