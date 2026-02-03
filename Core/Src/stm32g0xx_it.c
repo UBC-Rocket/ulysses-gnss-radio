@@ -61,6 +61,8 @@ static uint8_t radio_temp_index = 0;
 /* External variables --------------------------------------------------------*/
 extern DMA_HandleTypeDef hdma_spi1_tx;
 extern DMA_HandleTypeDef hdma_spi1_rx;
+extern UART_HandleTypeDef huart5;
+extern UART_HandleTypeDef huart6;
 /* USER CODE BEGIN EV */
 extern UART_HandleTypeDef huart5;
 extern radio_message_queue_t radio_message_queue;
@@ -172,6 +174,46 @@ void DMA1_Channel2_3_IRQHandler(void)
   /* USER CODE BEGIN DMA1_Channel2_3_IRQn 1 */
 
   /* USER CODE END DMA1_Channel2_3_IRQn 1 */
+}
+
+/**
+  * @brief This function handles USART3, USART4, USART5, USART6, LPUART1 globlal Interrupts (combined with EXTI 28).
+  */
+void USART3_4_5_6_LPUART1_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART3_4_5_6_LPUART1_IRQn 0 */
+  
+  if (huart5.Instance->ISR & USART_ISR_RXNE_RXFNE)
+  {
+    radio_rx_byte = (uint8_t)(huart5.Instance->RDR);
+
+    if (radio_rx_byte == 0x00)
+    {
+        if (radio_temp_index > 0)
+        {
+            radio_message_enqueue(radio_temp_index, radio_temp_buffer, &radio_message_queue);
+            radio_temp_index = 0;
+        }
+    }
+    else
+    {
+        if (radio_temp_index < RADIO_MESSAGE_MAX_LEN)
+        {
+            radio_temp_buffer[radio_temp_index] = radio_rx_byte;
+            radio_temp_index++;
+        }
+        else
+        {
+            radio_temp_index = 0;
+        }
+    }
+  }
+  /* USER CODE END USART3_4_5_6_LPUART1_IRQn 0 */
+  HAL_UART_IRQHandler(&huart5);
+  HAL_UART_IRQHandler(&huart6);
+  /* USER CODE BEGIN USART3_4_5_6_LPUART1_IRQn 1 */
+
+  /* USER CODE END USART3_4_5_6_LPUART1_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */
