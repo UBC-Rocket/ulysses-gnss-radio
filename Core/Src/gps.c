@@ -1,5 +1,4 @@
 /*
-
 Purpose: GPS Driver
 Functionalities:
     gps_init()
@@ -22,7 +21,7 @@ Functionalities:
     -> wait for $ (start)
     -> keep appending bytes
     -> when \n arrives (end)
-    -> send the whole sentence out UART1
+    -> send the whole sentence out UART1 (non-blocking)
     -> reset and wait for next $
 
     If UART error happens
@@ -30,7 +29,6 @@ Functionalities:
     -> re-arm receive again
 
 Author: Ernie Han
-
 */
 
 #include "gps.h"
@@ -55,13 +53,22 @@ static uint8_t s_ring[GPS_RX_RING_SZ];
 static volatile uint16_t s_head = 0;
 static volatile uint16_t s_tail = 0;
 
-// NMEA assembly (main context)
+// buffer to holld NMEA data as it's being built
 static uint8_t s_line[GPS_NMEA_MAX];
 static uint16_t s_line_len = 0;
 static bool s_in_sentence = false;
 
 // queue variable to use to send through SPI when gps data is ready
 static gps_sample_queue_t s_gps_queue;
+
+// to keep track of ongoing UART1 transmission
+static volatile bool s_out_tx_busy = false;
+
+// buffer to hold the complete NMEA sentence + tracks the length of it
+// s_line is reset as soon as NMEA sentence is sent out, so we need another
+// buffer while UART1 is transmitting
+static uint8_t s_out_tx_buf[GPS_NMEA_MAX];
+static uint16_t s_out_tx_len = 0;
 
 static inline bool ring_empty(void) { return s_head == s_tail; }
 static inline bool ring_full(uint16_t head, uint16_t tail) {
@@ -98,6 +105,22 @@ static void nmea_reset(void) {
   s_line_len = 0;
 }
 
+// helper function to send data through UART1 (non-blocking)
+static void out_try_start_tx(void) {
+  // check if UART1 is set && UART1 is not busy && there's data to send
+  if (!s_out || s_out_tx_busy || s_out_tx_len == 0)
+    return;
+
+  // mark UART1 as busy
+  s_out_tx_busy = true;
+
+  // Start non-blocking transmit
+  if (HAL_UART_Transmit_IT(s_out, s_out_tx_buf, s_out_tx_len) != HAL_OK) {
+    // if transfer failed, reset busy flag to false
+    s_out_tx_busy = false;
+  }
+}
+
 // parse bytes in the circular buffer, build complete NMEA sentence and
 static void build_complete_NMEA_sentence(uint8_t b) {
   // wait for the next '$' to start building the NMEA sentence
@@ -123,13 +146,19 @@ static void build_complete_NMEA_sentence(uint8_t b) {
   // be sent through SPI
   if (b == '\n') {
     if (s_out) {
-      (void)HAL_UART_Transmit(s_out, s_line, s_line_len, 50);
-      gps_sample_enqueue(s_line, &s_gps_queue);
+      // UART1 not busy, copy complete NMEA to s_out_tx_buf and start
+      // non-blocking transmit
+      if (!s_out_tx_busy) {
+        memcpy(s_out_tx_buf, s_line, s_line_len);
+        s_out_tx_len = s_line_len;
+        out_try_start_tx();
+      }
 
-      // TODO: would I have to dequeue somewhere after processing the NMEA \
+      // this will be commented out for testing purposes
+      // TODO: once testing is done, uncomment this line
+      // gps_sample_enqueue(s_line, &s_gps_queue);
     }
-      nmea_reset();
-    }
+    nmea_reset();
   }
 }
 
@@ -158,6 +187,8 @@ void gps_process(void) {
   }
 }
 
+// gets called when HAL_UART_Receive_IT() has received 1 byte -> when data
+// received, push to ring bufffer and rearm
 void gps_uart_rx_cplt_callback(UART_HandleTypeDef *huart) {
   if (!s_gps || huart != s_gps)
     return;
@@ -167,6 +198,16 @@ void gps_uart_rx_cplt_callback(UART_HandleTypeDef *huart) {
 
   // rearm
   (void)HAL_UART_Receive_IT(s_gps, &s_rx_byte, 1);
+}
+
+// gets called when HAL_UART_Transmit_IT() has finished sending data
+// marks UART1 as free and resets the buffer length to 0
+void gps_uart_tx_cplt_callback(UART_HandleTypeDef *huart) {
+  if (!s_out || huart != s_out)
+    return;
+
+  s_out_tx_busy = false;
+  s_out_tx_len = 0;
 }
 
 // error handling

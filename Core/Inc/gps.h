@@ -18,6 +18,7 @@ void gps_process(void);
 
 // Hook these from HAL callbacks in main.c
 void gps_uart_rx_cplt_callback(UART_HandleTypeDef *huart);
+void gps_uart_tx_cplt_callback(UART_HandleTypeDef *huart);
 void gps_uart_error_callback(UART_HandleTypeDef *huart);
 
 // ---------------------- TEST / SIM INJECTION ----------------------
