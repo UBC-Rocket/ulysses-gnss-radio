@@ -22,6 +22,7 @@
 #include "stm32g0xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "radio_queue.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,6 +52,9 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static uint8_t radio_rx_byte;
+static uint8_t radio_temp_buffer[RADIO_MESSAGE_MAX_LEN];
+static uint8_t radio_temp_index = 0;
 
 /* USER CODE END 0 */
 
@@ -58,7 +62,8 @@
 extern DMA_HandleTypeDef hdma_spi1_tx;
 extern DMA_HandleTypeDef hdma_spi1_rx;
 /* USER CODE BEGIN EV */
-
+extern UART_HandleTypeDef huart5;
+extern radio_message_queue_t radio_message_queue;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -170,5 +175,40 @@ void DMA1_Channel2_3_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/**
+  * @brief This function handles USART3, USART4, USART5, USART6, LPUART1 global interrupts / wake-up.
+  */
+void USART3_4_5_6_LPUART1_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART3_4_5_6_LPUART1_IRQn 0 */
+  
+  if (huart5.Instance->ISR & USART_ISR_RXNE_RXFNE)
+  {
+    radio_rx_byte = (uint8_t)(huart5.Instance->RDR);
+
+    if (radio_rx_byte == 0x00)
+    {
+        if (radio_temp_index > 0)
+        {
+            radio_message_enqueue(radio_temp_index, radio_temp_buffer, &radio_message_queue);
+            radio_temp_index = 0;
+        }
+    }
+    else
+    {
+        if (radio_temp_index < RADIO_MESSAGE_MAX_LEN)
+        {
+            radio_temp_buffer[radio_temp_index] = radio_rx_byte;
+            radio_temp_index++;
+        }
+        else
+        {
+            radio_temp_index = 0;
+        }
+    }
+  }
+  /* USER CODE END USART3_4_5_6_LPUART1_IRQn 0 */
+}
 
 /* USER CODE END 1 */

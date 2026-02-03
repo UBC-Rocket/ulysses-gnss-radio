@@ -1,9 +1,9 @@
-set(CMAKE_HOST_SYSTEM "Darwin-25.2.0")
+set(CMAKE_HOST_SYSTEM "Darwin-23.0.0")
 set(CMAKE_HOST_SYSTEM_NAME "Darwin")
-set(CMAKE_HOST_SYSTEM_VERSION "25.2.0")
+set(CMAKE_HOST_SYSTEM_VERSION "23.0.0")
 set(CMAKE_HOST_SYSTEM_PROCESSOR "arm64")
 
-include("/Users/benedikthoward/Projects/ulysses-gnss-radio/cmake/gcc-arm-none-eabi.cmake")
+include("/Users/ceo/Documents/Ulysses_FINAL/ulysses-gnss-radio/cmake/gcc-arm-none-eabi.cmake")
 
 set(CMAKE_SYSTEM "Generic")
 set(CMAKE_SYSTEM_NAME "Generic")

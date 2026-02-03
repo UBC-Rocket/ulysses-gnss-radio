@@ -51,7 +51,8 @@ UART_HandleTypeDef huart5;
 UART_HandleTypeDef huart6;
 
 /* USER CODE BEGIN PV */
-
+radio_message_queue_t radio_message_queue;
+gps_sample_queue_t gps_sample_queue;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -106,16 +107,14 @@ int main(void)
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-  radio_message_queue_t radio_message_queue;
-  gps_sample_queue_t gps_sample_queue;
-
-  
 
 
   radio_message_queue_init(&radio_message_queue);
   gps_sample_queue_init(&gps_sample_queue);
 
   init_spi_handler(&radio_message_queue, &gps_sample_queue);
+
+  __HAL_UART_ENABLE_IT(&huart5, UART_IT_RXNE);
 
   /* USER CODE END 2 */
 
@@ -124,7 +123,7 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
+    tick_spi_handler();
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -273,12 +272,13 @@ static void MX_USART5_UART_Init(void)
 
   /* USER CODE END USART5_Init 1 */
   huart5.Instance = USART5;
-  huart5.Init.BaudRate = 115200;
+  huart5.Init.BaudRate = 57600;
   huart5.Init.WordLength = UART_WORDLENGTH_8B;
   huart5.Init.StopBits = UART_STOPBITS_1;
   huart5.Init.Parity = UART_PARITY_NONE;
   huart5.Init.Mode = UART_MODE_TX_RX;
-  huart5.Init.HwFlowCtl = UART_HWCONTROL_RTS_CTS;
+  // huart5.Init.HwFlowCtl = UART_HWCONTROL_RTS_CTS;
+  huart5.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart5.Init.OverSampling = UART_OVERSAMPLING_16;
   huart5.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart5.Init.ClockPrescaler = UART_PRESCALER_DIV1;
