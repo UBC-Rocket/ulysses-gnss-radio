@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/Users/ceo/Documents/Ulysses_FINAL/ulysses-gnss-radio/build/Debug/cmake_install.cmake",
-		"/Users/ceo/Documents/Ulysses_FINAL/ulysses-gnss-radio/build/Debug/cmake/stm32cubemx/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
