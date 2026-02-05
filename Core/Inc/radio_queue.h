@@ -65,4 +65,35 @@ static inline void radio_message_queue_pop(radio_message_queue_t *q) {
     q->tail = (q->tail + 1) % RADIO_MESSAGE_QUEUE_LEN;
 }
 
+// LIFO operations (Last In, First Out) - returns most recent message
+static inline bool radio_message_dequeue_lifo(radio_message_queue_t *q, uint8_t *data) {
+    if (radio_message_queue_empty(q)) return false;
+
+    // Get the most recent message (head - 1)
+    uint8_t lifo_index = (q->head == 0) ? (RADIO_MESSAGE_QUEUE_LEN - 1) : (q->head - 1);
+    memcpy((void*)data, (void*)q->radio_messages[lifo_index], RADIO_MESSAGE_MAX_LEN);
+
+    // Decrement head to remove this message
+    q->head = lifo_index;
+
+    return true;
+}
+
+static inline bool radio_message_queue_head_pointer(radio_message_queue_t *q, uint8_t **head_pointer) {
+    if (radio_message_queue_empty(q)) return false;
+
+    // Get pointer to most recent message (head - 1)
+    uint8_t lifo_index = (q->head == 0) ? (RADIO_MESSAGE_QUEUE_LEN - 1) : (q->head - 1);
+    *head_pointer = q->radio_messages[lifo_index];
+
+    return true;
+}
+
+static inline void radio_message_queue_pop_lifo(radio_message_queue_t *q) {
+    if (radio_message_queue_empty(q)) return;
+
+    // Decrement head (remove most recent)
+    q->head = (q->head == 0) ? (RADIO_MESSAGE_QUEUE_LEN - 1) : (q->head - 1);
+}
+
 #endif
