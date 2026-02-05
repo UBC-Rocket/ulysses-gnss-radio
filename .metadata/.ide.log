@@ -492,3 +492,21 @@
 2026-02-03 15:28:24,991 [INFO] FinderPluginLoader:96 - Searching for filters in installed packs
 2026-02-03 15:28:26,399 [INFO] LoadUrlFilesThread:185 - End of LoadServerUrlFiles without Thread
 2026-02-03 15:28:26,444 [INFO] DetailPanel:341 - Set advertising image to /Users/ceo/STM32Cube/Repository//en.prom-stm32mp21-0126.png
+2026-02-03 17:46:19,964 [INFO] WebApp:194 - Connection lost
+2026-02-03 17:46:29,795 [INFO] WebApp:191 - Connection restablished
+2026-02-03 20:48:06,528 [INFO] WebApp:194 - Connection lost
+2026-02-03 20:48:15,832 [INFO] WebApp:191 - Connection restablished
+2026-02-03 22:49:49,619 [INFO] WebApp:194 - Connection lost
+2026-02-03 22:49:54,880 [INFO] WebApp:191 - Connection restablished
+2026-02-03 22:55:03,327 [INFO] MainUpdater:2872 - connection check result : 10
+2026-02-03 22:55:03,640 [INFO] McuFinderGlobals:76 - Set McuFinderConnectedMode to true
+2026-02-03 22:55:03,645 [INFO] MultiScanPanel:200 - Auto-refresh data requested => check proxy status ongoing
+2026-02-03 22:55:03,646 [INFO] FinderPluginLoader:96 - Searching for filters in installed packs
+2026-02-03 22:55:05,349 [INFO] LoadUrlFilesThread:185 - End of LoadServerUrlFiles without Thread
+2026-02-03 22:55:05,350 [INFO] DetailPanel:341 - Set advertising image to /Users/ceo/STM32Cube/Repository//en.prom-stm32mp21-0126.png
+2026-02-03 23:05:31,986 [ERROR] LogOutputStream:75 - [STDERR_REDIRECT] 
+2026-02-03 23:05:57,018 [INFO] Activator:176 - 
+
+
+2026-02-03 23:05:57,020 [INFO] Activator:177 - !SESSION log4j initialized
+2026-02-03 23:06:02,209 [INFO] LogOutputStream:77 - [STDOUT_REDIRECT] 

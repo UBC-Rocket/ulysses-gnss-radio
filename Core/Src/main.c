@@ -4,16 +4,6 @@
   * @file           : main.c
   * @brief          : Main program body
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -24,22 +14,8 @@
 #include "radio_queue.h"
 #include "gps_queue.h"
 #include "spi_slave.h"
+#include <string.h>
 /* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi1;
@@ -63,13 +39,26 @@ static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART5_UART_Init(void);
 static void MX_USART6_UART_Init(void);
-/* USER CODE BEGIN PFP */
 
-/* USER CODE END PFP */
-
-/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* USER CODE BEGIN 0 */
+uint8_t rx_buffer[1];
 
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        // Forward received byte to Radio (UART5) - NON-BLOCKING
+        HAL_UART_Transmit_IT(&huart5, rx_buffer, 1);
+        
+        // Echo back to ST-Link (so you see what you typed)
+        HAL_UART_Transmit(&huart1, rx_buffer, 1, 100);
+        
+        // Re-enable receive interrupt for next byte
+        HAL_UART_Receive_IT(&huart1, rx_buffer, 1);
+    }
+}
+/* USER CODE END 0 */
 /* USER CODE END 0 */
 
 /**
@@ -78,55 +67,32 @@ static void MX_USART6_UART_Init(void);
   */
 int main(void)
 {
-
-  /* USER CODE BEGIN 1 */
-
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
   SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
+  
   /* USER CODE BEGIN 2 */
-
-
-  radio_message_queue_init(&radio_message_queue);
-  gps_sample_queue_init(&gps_sample_queue);
-
-  init_spi_handler(&radio_message_queue, &gps_sample_queue);
-
-  __HAL_UART_ENABLE_IT(&huart5, UART_IT_RXNE);
-
+  uint8_t test_msg[] = "Radio Test\r\n";
+  
+  HAL_UART_Transmit(&huart1, (uint8_t*)"Starting radio test\r\n", 21, 1000);
   /* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    tick_spi_handler();
-    /* USER CODE END WHILE */
-    /* USER CODE BEGIN 3 */
+    // Send to Radio via UART5
+    HAL_UART_Transmit(&huart5, test_msg, sizeof(test_msg)-1, 1000);
+    
+    // Also send to ST-Link to confirm we're transmitting
+    HAL_UART_Transmit(&huart1, (uint8_t*)"Sent to radio\r\n", 15, 1000);
+    
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
+    HAL_Delay(1000);
   }
-  /* USER CODE END 3 */
 }
 
 /**
