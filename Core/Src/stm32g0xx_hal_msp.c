@@ -237,7 +237,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     /* USER CODE END USART1_MspInit 1 */
   }
   else if(huart->Instance==USART5)
-{
+  {
     /* USER CODE BEGIN USART5_MspInit 0 */
 
     /* USER CODE END USART5_MspInit 0 */
@@ -247,14 +247,14 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
 
     __HAL_RCC_GPIOB_CLK_ENABLE();
     /**USART5 GPIO Configuration
-    PB0     ------> USART5_TX
-    PB1     ------> USART5_RX
+    PB3     ------> USART5_TX
+    PB4     ------> USART5_RX
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+    GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_4;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF8_USART5;
+    GPIO_InitStruct.Alternate = GPIO_AF3_USART5;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     /* USART5 interrupt Init */
@@ -263,7 +263,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     /* USER CODE BEGIN USART5_MspInit 1 */
 
     /* USER CODE END USART5_MspInit 1 */
-}
+  }
   else if(huart->Instance==USART6)
   {
     /* USER CODE BEGIN USART6_MspInit 0 */
@@ -330,10 +330,10 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
     __HAL_RCC_USART5_CLK_DISABLE();
 
     /**USART5 GPIO Configuration
-    PB0     ------> USART5_TX
-    PB1     ------> USART5_RX
+    PB3     ------> USART5_TX
+    PB4     ------> USART5_RX
     */
-    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_0|GPIO_PIN_1);
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_3|GPIO_PIN_4);
 
     /* USART5 interrupt DeInit */
     /* USER CODE BEGIN USART5:USART3_4_5_6_LPUART1_IRQn disable */
