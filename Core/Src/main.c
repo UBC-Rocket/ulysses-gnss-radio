@@ -114,9 +114,13 @@ int main(void)
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-  uint8_t test_msg[] = "Radio Test\r\n";
-  
-  HAL_UART_Transmit(&huart1, (uint8_t*)"Starting radio test\r\n", 21, 1000);
+  radio_message_queue_init(&radio_message_queue);
+    
+  // ✅ LINE 2: Start UART5 RX interrupt (100% REQUIRED)
+  static uint8_t rx_byte;
+  HAL_UART_Receive_IT(&huart5, &rx_byte, 1);
+
+  HAL_UART_Transmit(&huart1, (uint8_t*)"Radio RX ready\r\n", 16, 100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -126,6 +130,25 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    
+
+    static uint32_t loop_count = 0;
+    if (loop_count++ % 100 == 0) {  // Every 1 second (100 * 10ms)
+        HAL_GPIO_TogglePin(GPIOB, STAT_LEDR_Pin);
+    }
+
+    // Check if radio message received
+    if (!radio_message_queue_empty(&radio_message_queue)) {
+        uint8_t msg[255];
+        radio_message_dequeue(&radio_message_queue, msg);
+        
+        // Output to ST-Link UART (UART1)
+        HAL_UART_Transmit(&huart1, (uint8_t*)"RX: ", 4, 100);
+        HAL_UART_Transmit(&huart1, msg, strlen((char*)msg), 100);
+        HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
+    }
+    
+    HAL_Delay(10);  // 10 ms delay
   }
   /* USER CODE END 3 */
 }
@@ -189,7 +212,7 @@ static void MX_SPI1_Init(void)
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_SLAVE;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
+  hspi1.Init.DataSize = SPI_DATASIZE_4BIT; // TODO 4 bit? why not 8-bit
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_HARD_INPUT;

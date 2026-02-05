@@ -172,30 +172,41 @@ void USART3_4_5_6_LPUART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART3_4_5_6_LPUART1_IRQn 0 */
 
+  extern UART_HandleTypeDef huart1;
+
   if (huart5.Instance->ISR & USART_ISR_RXNE_RXFNE)
   {
-    radio_rx_byte = (uint8_t)(huart5.Instance->RDR);
-
-    if (radio_rx_byte == 0x00)
-    {
-        if (radio_temp_index > 0)
-        {
-            radio_message_enqueue(radio_temp_index, radio_temp_buffer, &radio_message_queue);
-            radio_temp_index = 0;
-        }
-    }
-    else
-    {
-        if (radio_temp_index < RADIO_MESSAGE_MAX_LEN)
-        {
-            radio_temp_buffer[radio_temp_index] = radio_rx_byte;
-            radio_temp_index++;
-        }
-        else
-        {
-            radio_temp_index = 0;
-        }
-    }
+      radio_rx_byte = (uint8_t)(huart5.Instance->RDR);
+      
+      // ✅ DEBUG: Echo every byte to ST-Link immediately
+      HAL_UART_Transmit(&huart1, &radio_rx_byte, 1, 10);
+      
+      if (radio_rx_byte == 0x00)
+      {
+          if (radio_temp_index > 0)
+          {
+              // ✅ DEBUG: Signal message complete
+              uint8_t msg[] = "\r\n[MSG]\r\n";
+              HAL_UART_Transmit(&huart1, msg, sizeof(msg)-1, 10);
+              
+              radio_message_enqueue(radio_temp_index, 
+                                  radio_temp_buffer,
+                                  &radio_message_queue);
+              radio_temp_index = 0;
+          }
+      }
+      else
+      {
+          if (radio_temp_index < RADIO_MESSAGE_MAX_LEN)
+          {
+              radio_temp_buffer[radio_temp_index] = radio_rx_byte;
+              radio_temp_index++;
+          }
+          else
+          {
+              radio_temp_index = 0;
+          }
+      }
   }
   /* USER CODE END USART3_4_5_6_LPUART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart5);
