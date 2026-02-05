@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Ulysses GNSS - Debug",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/ulysses-gnss-radio.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "openocd",
+            "configFiles": [
+                "interface/stlink-dap.cfg",
+                "target/stm32g0x.cfg"
+            ],
+            "searchDir": [
+                "${env:STM32_OPENOCD_SCRIPTS_PATH}",
+                // "/usr/local/share/openocd/scripts"
+            ],
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "raw"
+        }
+    ]
+}

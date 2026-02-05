@@ -4,16 +4,6 @@
   * @file           : main.c
   * @brief          : Main program body
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -24,6 +14,7 @@
 #include "radio_queue.h"
 #include "gps_queue.h"
 #include "spi_slave.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,7 +42,8 @@ UART_HandleTypeDef huart5;
 UART_HandleTypeDef huart6;
 
 /* USER CODE BEGIN PV */
-
+radio_message_queue_t radio_message_queue;
+gps_sample_queue_t gps_sample_queue;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -68,7 +60,23 @@ static void MX_USART6_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* USER CODE BEGIN 0 */
+uint8_t rx_buffer[1];
 
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        // Forward received byte to Radio (UART5) - NON-BLOCKING
+        HAL_UART_Transmit_IT(&huart5, rx_buffer, 1);
+        
+        // Echo back to ST-Link (so you see what you typed)
+        HAL_UART_Transmit(&huart1, rx_buffer, 1, 100);
+        
+        // Re-enable receive interrupt for next byte
+        HAL_UART_Receive_IT(&huart1, rx_buffer, 1);
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -106,17 +114,13 @@ int main(void)
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-  radio_message_queue_t radio_message_queue;
-  gps_sample_queue_t gps_sample_queue;
-
-  
-
-
   radio_message_queue_init(&radio_message_queue);
-  gps_sample_queue_init(&gps_sample_queue);
+    
+  // ✅ LINE 2: Start UART5 RX interrupt (100% REQUIRED)
+  static uint8_t rx_byte;
+  HAL_UART_Receive_IT(&huart5, &rx_byte, 1);
 
-  init_spi_handler(&radio_message_queue, &gps_sample_queue);
-
+  HAL_UART_Transmit(&huart1, (uint8_t*)"Radio RX ready\r\n", 16, 100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -126,6 +130,25 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    
+
+    static uint32_t loop_count = 0;
+    if (loop_count++ % 100 == 0) {  // Every 1 second (100 * 10ms)
+        HAL_GPIO_TogglePin(GPIOB, STAT_LEDR_Pin);
+    }
+
+    // Check if radio message received
+    if (!radio_message_queue_empty(&radio_message_queue)) {
+        uint8_t msg[255];
+        radio_message_dequeue(&radio_message_queue, msg);
+        
+        // Output to ST-Link UART (UART1)
+        HAL_UART_Transmit(&huart1, (uint8_t*)"RX: ", 4, 100);
+        HAL_UART_Transmit(&huart1, msg, strlen((char*)msg), 100);
+        HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
+    }
+    
+    HAL_Delay(10);  // 10 ms delay
   }
   /* USER CODE END 3 */
 }
@@ -189,7 +212,7 @@ static void MX_SPI1_Init(void)
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_SLAVE;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
+  hspi1.Init.DataSize = SPI_DATASIZE_4BIT; // TODO 4 bit? why not 8-bit
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_HARD_INPUT;
@@ -273,12 +296,12 @@ static void MX_USART5_UART_Init(void)
 
   /* USER CODE END USART5_Init 1 */
   huart5.Instance = USART5;
-  huart5.Init.BaudRate = 115200;
+  huart5.Init.BaudRate = 57600;
   huart5.Init.WordLength = UART_WORDLENGTH_8B;
   huart5.Init.StopBits = UART_STOPBITS_1;
   huart5.Init.Parity = UART_PARITY_NONE;
   huart5.Init.Mode = UART_MODE_TX_RX;
-  huart5.Init.HwFlowCtl = UART_HWCONTROL_RTS_CTS;
+  huart5.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart5.Init.OverSampling = UART_OVERSAMPLING_16;
   huart5.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart5.Init.ClockPrescaler = UART_PRESCALER_DIV1;
@@ -369,7 +392,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2|GPIO_PIN_7, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, STAT_LEDR_Pin|GPS_PULSE_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : PC13 */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
@@ -378,8 +401,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB2 PB7 */
-  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_7;
+  /*Configure GPIO pins : STAT_LEDR_Pin GPS_PULSE_Pin */
+  GPIO_InitStruct.Pin = STAT_LEDR_Pin|GPS_PULSE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
