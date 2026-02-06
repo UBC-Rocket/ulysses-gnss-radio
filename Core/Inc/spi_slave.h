@@ -1,75 +1,180 @@
-#ifndef SPI_SLAVE_H
-#define SPI_SLAVE_H
+#ifndef SPI_SLAVE_LL_H
+#define SPI_SLAVE_LL_H
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "main.h"
+#include "stm32g0xx.h"
+#include "protocol_config.h"
 #include "radio_queue.h"
-#include "gps_queue.h"
+#include "gps_nema_queue.h"
 
-// Payload sizes for SPI transfers
-#define GPS_PAYLOAD_SIZE    64
-#define RADIO_PAYLOAD_SIZE  255
-#define RX_BUFFER_SIZE      255  // Radio messages from FC
+// ============================================================================
+// HARDWARE DEFINITIONS
+// ============================================================================
 
-// Data type identifiers sent to FC
+// SPI Peripheral Selection
+#define SPI_PERIPHERAL          SPI2
+
+// DMA Configuration
+#define DMA_CONTROLLER          DMA1
+#define RX_DMA_CHANNEL          DMA1_Channel1
+#define TX_DMA_CHANNEL          DMA1_Channel2
+#define RX_DMAMUX_CHANNEL       DMAMUX1_Channel0
+#define TX_DMAMUX_CHANNEL       DMAMUX1_Channel1
+
+// DMAMUX Request IDs (RM0444 Table 59)
+#define DMAREQ_SPI2_RX          18
+#define DMAREQ_SPI2_TX          19
+
+// ============================================================================
+// GPIO PIN DEFINITIONS
+// ============================================================================
+
+#define SPI_NSS_PIN             GPIO_PIN_12  // PB12
+#define SPI_SCK_PIN             GPIO_PIN_13  // PB13
+#define SPI_MISO_PIN            GPIO_PIN_14  // PB14
+#define SPI_MOSI_PIN            GPIO_PIN_15  // PB15
+#define SPI_GPIO_PORT           GPIOB
+
+// For STM32G0B1, SPI2 is typically AF0 on PB12-15, but VERIFY THIS!
+#define SPI_AF_NUM              0
+
+// NSS EXTI Configuration
+#define NSS_EXTI_LINE           12
+#define NSS_EXTI_PORT           0x01  // Port B = 0x01 (for EXTICR register)
+
+// IRQ Line for Push Mode (PB2)
+#define IRQ_GPIO_PORT           GPIOB
+#define IRQ_GPIO_PIN            GPIO_PIN_2
+
+// ============================================================================
+// STATE MACHINE
+// ============================================================================
+
 typedef enum {
-    SPI_DATA_GPS = 0x01,
-    SPI_DATA_RADIO = 0x02,
-} spi_data_type_t;
+    SPI_STATE_IDLE,          // Waiting for command byte (RXNEIE enabled)
+    SPI_STATE_ACTIVE,        // Mid-transaction (DMA handling remaining bytes)
 
-// SPI handler state machine states
-// INT line arbitrates: LOW = RX mode (FC can write), HIGH = TX mode (FC should read)
-typedef enum {
-    SPI_STATE_IDLE,     // RX DMA armed, INT low, waiting for FC write or tick()
-    SPI_STATE_TX_TYPE,  // TX DMA armed with type byte, INT high, waiting for FC read
-    SPI_STATE_TX_DATA,  // TX DMA armed with payload, INT high, waiting for FC read
-} spi_handler_state_t;
+    // Push mode states (not used yet, prepared for future)
+    // SPI_STATE_HAVE_DATA,     // Push mode: data ready, IRQ asserted
+    // SPI_STATE_PUSH_TYPE,     // Push mode: sending type byte
+    // SPI_STATE_PUSH_PAYLOAD,  // Push mode: sending payload
+    // SPI_STATE_COLLISION,     // Push mode: collision detected
+} spi_slave_state_t;
 
-// Callback type for forwarding received radio messages to UART TX
-typedef void (*radio_tx_callback_t)(uint8_t *data, uint16_t len);
+// ============================================================================
+// CONTEXT STRUCTURE
+// ============================================================================
 
-// Current TX transaction context
 typedef struct {
-    spi_data_type_t data_type;
-    uint8_t *tx_buffer;
-    uint16_t tx_size;
-} spi_transaction_t;
+    // ── State ──
+    volatile spi_slave_state_t state;
+    volatile uint8_t current_cmd;
+    volatile bool payload_processed;  // Prevents double-processing in DMA TC + EXTI
 
-// Main SPI handler structure
-typedef struct {
+    // ── Buffers ──
+    // NOTE: Aligned to 32-byte boundary for optimal DMA performance
+    uint8_t tx_buf[MAX_TRANSACTION_SIZE] __attribute__((aligned(32)));
+    uint8_t rx_buf[MAX_TRANSACTION_SIZE] __attribute__((aligned(32)));
+
+    // ── Queue Pointers ──
     radio_message_queue_t *radio_queue;
     gps_sample_queue_t *gps_queue;
 
-    spi_handler_state_t state;
-    spi_transaction_t current_transaction;
-    
-    board_state_t board_state;
-    
-    // Ping-pong RX buffers
-    uint8_t *rx_active_buffer;    // Currently receiving into
-    uint8_t *rx_complete_buffer;  // Ready to process
-    
-    // Callback for forwarding radio messages to UART
-    radio_tx_callback_t radio_tx_callback;
-} spi_handler_t;
+    // ── Statistics & Diagnostics ──
+    volatile uint32_t transactions_completed;
+    volatile uint32_t overrun_errors;
+    volatile uint32_t transfer_errors;
+    volatile uint32_t unknown_commands;
 
-// Initialize the SPI handler with queue pointers (arms RX DMA, starts in IDLE)
-void init_spi_handler(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_queue);
+    // ── Push Mode Infrastructure (prepared, not used yet) ──
+    volatile bool irq_asserted;
+    uint32_t irq_assert_timestamp;
+    uint32_t collisions_detected;
 
-// Called from main loop - transitions IDLE -> TX_TYPE when data available
-void tick_spi_handler(void);
+} spi_slave_context_t;
 
-// Called from HAL_SPI_TxCpltCallback when TX DMA completes
-void spi_tx_complete(void);
+// ============================================================================
+// PUBLIC API
+// ============================================================================
 
-// Called from HAL_SPI_RxCpltCallback when RX DMA completes (255 bytes received)
-void spi_rx_complete(void);
+/**
+ * @brief Initialize SPI slave peripheral in pull mode
+ *
+ * Configures SPI2 as slave with hardware NSS, sets up DMA channels,
+ * and arms for the first transaction.
+ *
+ * @param radio_queue Pointer to radio message queue
+ * @param gps_queue Pointer to GPS sample queue
+ */
+void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_queue);
 
-// Set the board state (called when errors occur)
-void spi_handler_set_board_state(board_state_t state);
+/**
+ * @brief Get current state (for debugging)
+ */
+spi_slave_state_t spi_slave_get_state(void);
 
-// Set callback for forwarding received radio messages to UART TX
-void spi_handler_set_radio_tx_callback(radio_tx_callback_t callback);
+/**
+ * @brief Get statistics structure (for debugging)
+ */
+const spi_slave_context_t* spi_slave_get_context(void);
 
-#endif
+/**
+ * @brief Reset error counters
+ */
+void spi_slave_reset_errors(void);
+
+// ============================================================================
+// INTERRUPT HANDLERS (must be called from stm32g0xx_it.c)
+// ============================================================================
+//
+// These functions contain the actual interrupt logic. They are called by the
+// corresponding IRQHandler functions in stm32g0xx_it.c.
+//
+// NOTE: The functions are named with _handler suffix to avoid duplicate symbol
+// errors with the standard IRQHandler names which are defined in stm32g0xx_it.c
+
+/**
+ * @brief SPI2 RXNE interrupt logic
+ * Called when command byte arrives. This is the critical handoff point.
+ * Must be called from SPI2_IRQHandler() in stm32g0xx_it.c
+ */
+void spi_slave_spi2_irq_handler(void);
+
+/**
+ * @brief DMA1 Channel 1 (RX) interrupt logic
+ * Called when RX DMA transfer completes or errors
+ * Must be called from DMA1_Channel1_IRQHandler() in stm32g0xx_it.c
+ */
+void spi_slave_dma1_ch1_irq_handler(void);
+
+/**
+ * @brief NSS EXTI interrupt logic (line 12)
+ * Called when NSS rising edge detected (transaction end)
+ * Must be called from EXTI4_15_IRQHandler() in stm32g0xx_it.c
+ */
+void spi_slave_nss_exti_handler(void);
+
+// ============================================================================
+// PUSH MODE API (stubs for future implementation)
+// ============================================================================
+
+/**
+ * @brief Assert IRQ line to master (push mode)
+ * TODO: Implement when push mode is enabled
+ */
+void spi_slave_assert_irq(void);
+
+/**
+ * @brief Deassert IRQ line to master (push mode)
+ * TODO: Implement when push mode is enabled
+ */
+void spi_slave_deassert_irq(void);
+
+/**
+ * @brief Check for pending push data and assert IRQ if needed (push mode)
+ * TODO: Implement when push mode is enabled
+ */
+void spi_slave_tick(void);
+
+#endif // SPI_SLAVE_LL_H

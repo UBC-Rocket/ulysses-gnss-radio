@@ -12,7 +12,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "radio_queue.h"
-#include "gps_queue.h"
+#include "gps_nema_queue.h"
 #include "spi_slave.h"
 #include <string.h>
 /* USER CODE END Includes */
@@ -159,6 +159,13 @@ int main(void)
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
+  static radio_message_queue_t radio_message_queue;
+  static gps_sample_queue_t gps_sample_queue;
+
+  radio_message_queue_init(&radio_message_queue);
+  gps_sample_queue_init(&gps_sample_queue);
+
+  spi_slave_init(&radio_message_queue, &gps_sample_queue);
   radio_init();
 
   HAL_UART_Transmit(&huart1, (uint8_t*)"Radio RX ready\r\n", 16, 100);

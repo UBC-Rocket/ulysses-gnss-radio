@@ -12,7 +12,7 @@
 #include "stm32g0xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "radio_queue.h"
+#include "spi_slave.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -49,8 +49,8 @@ static uint8_t radio_temp_index = 0;
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-extern DMA_HandleTypeDef hdma_spi1_tx;
-extern DMA_HandleTypeDef hdma_spi1_rx;
+// extern DMA_HandleTypeDef hdma_spi1_tx;  // Not used - SPI slave uses register-level SPI2
+// extern DMA_HandleTypeDef hdma_spi1_rx;  // Not used - SPI slave uses register-level SPI2
 extern UART_HandleTypeDef huart5;
 extern UART_HandleTypeDef huart6;
 /* USER CODE BEGIN EV */
@@ -143,9 +143,10 @@ void SysTick_Handler(void)
 void DMA1_Channel1_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel1_IRQn 0 */
-
+  // SPI2 RX DMA handler (for SPI slave)
+  spi_slave_dma1_ch1_irq_handler();
   /* USER CODE END DMA1_Channel1_IRQn 0 */
-  HAL_DMA_IRQHandler(&hdma_spi1_tx);
+  // HAL_DMA_IRQHandler(&hdma_spi1_tx);  // Disabled - not using HAL SPI1
   /* USER CODE BEGIN DMA1_Channel1_IRQn 1 */
 
   /* USER CODE END DMA1_Channel1_IRQn 1 */
@@ -157,9 +158,10 @@ void DMA1_Channel1_IRQHandler(void)
 void DMA1_Channel2_3_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel2_3_IRQn 0 */
-
+  // SPI2 TX DMA uses channel 2, but we don't need an interrupt handler for it
+  // (we don't care about TX completion - NSS rising edge handles transaction end)
   /* USER CODE END DMA1_Channel2_3_IRQn 0 */
-  HAL_DMA_IRQHandler(&hdma_spi1_rx);
+  // HAL_DMA_IRQHandler(&hdma_spi1_rx);  // Disabled - not using HAL SPI1
   /* USER CODE BEGIN DMA1_Channel2_3_IRQn 1 */
 
   /* USER CODE END DMA1_Channel2_3_IRQn 1 */
@@ -205,5 +207,34 @@ void USART3_4_5_6_LPUART1_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/**
+  * @brief This function handles SPI2/SPI3 global interrupt.
+  *
+  * SPI2 is used for the SPI slave (GNSS/Radio board).
+  * RXNE interrupt captures the command byte.
+  * STM32G0B1 has combined SPI2_3_IRQn
+  */
+void SPI2_3_IRQHandler(void)
+{
+  spi_slave_spi2_irq_handler();
+}
+
+/**
+  * @brief This function handles EXTI line 4 to 15 interrupts.
+  *
+  * PB12 (SPI2_NSS) is configured as EXTI12 for transaction end detection.
+  */
+void EXTI4_15_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI4_15_IRQn 0 */
+  // SPI2 NSS rising edge handler (for SPI slave transaction end)
+  spi_slave_nss_exti_handler();
+  /* USER CODE END EXTI4_15_IRQn 0 */
+  // HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_4);  // Disabled - not using HAL SPI1
+  /* USER CODE BEGIN EXTI4_15_IRQn 1 */
+
+  /* USER CODE END EXTI4_15_IRQn 1 */
+}
 
 /* USER CODE END 1 */
