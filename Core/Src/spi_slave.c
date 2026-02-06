@@ -1,18 +1,25 @@
 /**
- * @file spi_slave_ll.c
+ * @file spi_slave.c
  * @brief Low-level register-based SPI slave implementation for STM32G0B1
+ *
+ * Hardware Configuration:
+ * - SPI1 on PA4(NSS), PA5(SCK), PA6(MISO), PA7(MOSI)
+ * - IRQ output on PB2 (active low, for push mode)
+ * - DMA1 Channel 1 (RX), Channel 2 (TX)
  *
  * Implements hybrid RXNE interrupt + DMA approach:
  * - First byte (command) captured by RXNE interrupt
  * - Remaining bytes handled by DMA (zero CPU overhead)
  * - Hardware NSS for automatic transaction framing
- * - EXTI on NSS rising edge for transaction completion
+ * - EXTI on NSS rising edge (line 4) for transaction completion
  *
- * Protocol: Pull mode only (master-initiated transactions)
- * Wire format: [CMD:1][DUMMY:4][PAYLOAD:0-256] = max 261 bytes
+ * Protocol Modes:
+ * - Pull mode: Master-initiated transactions [CMD:1][DUMMY:4][PAYLOAD:0-256]
+ * - Push mode: Slave-initiated via IRQ [TYPE:1][PAYLOAD:N]
  */
 
 #include "spi_slave.h"
+// #include "gps_driver.h"  // TODO: Add when GPS driver is implemented
 #include <string.h>
 
 // ============================================================================
@@ -32,46 +39,48 @@ static void exti_nss_init(void);
 static void spi_rx_dma_start(uint8_t *buf, uint16_t len);
 static void spi_tx_dma_start(uint8_t *buf, uint16_t len);
 static void spi_slave_arm(void);
+static void spi_slave_arm_push(void);
 static void spi_clear_errors(void);
 static uint8_t radio_queue_count(radio_message_queue_t *q);
+static void spi_slave_prepare_push(uint8_t push_type);
 
 // ============================================================================
 // INITIALIZATION FUNCTIONS
 // ============================================================================
 
 /**
- * @brief Configure GPIO pins for SPI2 alternate function
+ * @brief Configure GPIO pins for SPI1 alternate function
  */
 static void spi_gpio_init(void) {
-    // Enable GPIOB clock
-    RCC->IOPENR |= RCC_IOPENR_GPIOBEN;
+    // Enable GPIOA and GPIOB clocks
+    RCC->IOPENR |= RCC_IOPENR_GPIOAEN | RCC_IOPENR_GPIOBEN;
 
-    // Configure PB12(NSS), PB13(SCK), PB14(MISO), PB15(MOSI) as alternate function mode
+    // Configure PA4(NSS), PA5(SCK), PA6(MISO), PA7(MOSI) as alternate function mode
     // MODER: 00=input, 01=output, 10=AF, 11=analog
-    GPIOB->MODER = (GPIOB->MODER
-                    & ~((3 << (12*2)) | (3 << (13*2)) | (3 << (14*2)) | (3 << (15*2))))
-                    | (2 << (12*2))   // PB12 NSS  → AF
-                    | (2 << (13*2))   // PB13 SCK  → AF
-                    | (2 << (14*2))   // PB14 MISO → AF
-                    | (2 << (15*2));  // PB15 MOSI → AF
+    GPIOA->MODER = (GPIOA->MODER
+                    & ~((3 << (4*2)) | (3 << (5*2)) | (3 << (6*2)) | (3 << (7*2))))
+                    | (2 << (4*2))   // PA4 NSS  → AF
+                    | (2 << (5*2))   // PA5 SCK  → AF
+                    | (2 << (6*2))   // PA6 MISO → AF
+                    | (2 << (7*2));  // PA7 MOSI → AF
 
     // Pull-up on NSS (keeps line high when master not connected)
     // PUPDR: 00=no pull, 01=pull-up, 10=pull-down
-    GPIOB->PUPDR = (GPIOB->PUPDR & ~(3 << (12*2))) | (1 << (12*2));
+    GPIOA->PUPDR = (GPIOA->PUPDR & ~(3 << (4*2))) | (1 << (4*2));
 
     // High speed on MISO and SCK (reduces edge ringing at high frequencies)
     // OSPEEDR: 00=low, 01=medium, 10=high, 11=very high
-    GPIOB->OSPEEDR |= (3 << (14*2))  // MISO very high speed
-                    | (3 << (13*2)); // SCK very high speed
+    GPIOA->OSPEEDR |= (3 << (6*2))   // MISO very high speed
+                    | (3 << (5*2));  // SCK very high speed
 
-    // Set alternate function numbers (AFRH for pins 8-15)
-    GPIOB->AFR[1] = (GPIOB->AFR[1]
-                    & ~((0xF << ((12-8)*4)) | (0xF << ((13-8)*4))
-                       | (0xF << ((14-8)*4)) | (0xF << ((15-8)*4))))
-                    | (SPI_AF_NUM << ((12-8)*4))    // NSS
-                    | (SPI_AF_NUM << ((13-8)*4))    // SCK
-                    | (SPI_AF_NUM << ((14-8)*4))    // MISO
-                    | (SPI_AF_NUM << ((15-8)*4));   // MOSI
+    // Set alternate function numbers (AFRL for pins 0-7)
+    GPIOA->AFR[0] = (GPIOA->AFR[0]
+                    & ~((0xF << (4*4)) | (0xF << (5*4))
+                       | (0xF << (6*4)) | (0xF << (7*4))))
+                    | (SPI_AF_NUM << (4*4))    // NSS
+                    | (SPI_AF_NUM << (5*4))    // SCK
+                    | (SPI_AF_NUM << (6*4))    // MISO
+                    | (SPI_AF_NUM << (7*4));   // MOSI
 
     // Configure IRQ pin (PB2) for push mode - output, initially high (inactive)
     GPIOB->MODER = (GPIOB->MODER & ~(3 << (2*2))) | (1 << (2*2));  // Output mode
@@ -79,18 +88,18 @@ static void spi_gpio_init(void) {
 }
 
 /**
- * @brief Configure SPI2 peripheral registers
+ * @brief Configure SPI1 peripheral registers
  */
 static void spi_peripheral_init(void) {
-    // Enable SPI2 clock
-    RCC->APBENR1 |= RCC_APBENR1_SPI2EN;
+    // Enable SPI1 clock (SPI1 is on APB2, not APB1!)
+    RCC->APBENR2 |= RCC_APBENR2_SPI1EN;
 
     // Disable SPI during configuration
-    SPI2->CR1 &= ~SPI_CR1_SPE;
+    SPI1->CR1 &= ~SPI_CR1_SPE;
 
     // ── CR1 Configuration ──
     // All zeros = slave mode, CPOL=0, CPHA=0 (SPI Mode 0), MSB first, hardware NSS
-    SPI2->CR1 = 0;
+    SPI1->CR1 = 0;
     // CPHA=0: data sampled on first (leading) clock edge
     // CPOL=0: clock idles low
     // MSTR=0: slave mode
@@ -99,14 +108,14 @@ static void spi_peripheral_init(void) {
 
     // ── CR2 Configuration ──
     // This is the critical register for STM32G0 SPI operation
-    SPI2->CR2 = (7 << SPI_CR2_DS_Pos)    // DS=0b0111 → 8-bit data frames
+    SPI1->CR2 = (7 << SPI_CR2_DS_Pos)    // DS=0b0111 → 8-bit data frames
               | SPI_CR2_FRXTH             // CRITICAL: FIFO RX threshold = 1 byte (not 2!)
               | SPI_CR2_RXNEIE            // RXNE interrupt enabled (for command byte)
               | SPI_CR2_TXDMAEN;          // TX DMA enabled from start
     // Note: RXDMAEN is deliberately OFF - will be enabled after RXNE ISR reads command
 
     // Enable SPI peripheral
-    SPI2->CR1 |= SPI_CR1_SPE;
+    SPI1->CR1 |= SPI_CR1_SPE;
 }
 
 /**
@@ -117,26 +126,26 @@ static void dmamux_init(void) {
     // DMA1_Channel1 → DMAMUX1_Channel0
     // DMA1_Channel2 → DMAMUX1_Channel1
 
-    // Route SPI2_RX to DMA1 Channel 1 (DMAMUX Channel 0)
-    DMAMUX1_Channel0->CCR = DMAREQ_SPI2_RX;  // 18
+    // Route SPI1_RX to DMA1 Channel 1 (DMAMUX Channel 0)
+    DMAMUX1_Channel0->CCR = DMAREQ_SPI_RX;  // 16
 
-    // Route SPI2_TX to DMA1 Channel 2 (DMAMUX Channel 1)
-    DMAMUX1_Channel1->CCR = DMAREQ_SPI2_TX;  // 19
+    // Route SPI1_TX to DMA1 Channel 2 (DMAMUX Channel 1)
+    DMAMUX1_Channel1->CCR = DMAREQ_SPI_TX;  // 17
 }
 
 /**
  * @brief Configure EXTI for NSS rising edge detection
  */
 static void exti_nss_init(void) {
-    // Route PB12 to EXTI line 12
-    // EXTICR[3] handles lines 12-15
+    // Route PA4 to EXTI line 4
+    // EXTICR[1] handles lines 4-7
     // Each line gets 8 bits: 0x00=PortA, 0x01=PortB, 0x02=PortC, etc.
-    EXTI->EXTICR[3] = (EXTI->EXTICR[3] & ~(0xFF << 0)) | (NSS_EXTI_PORT << 0);
+    EXTI->EXTICR[1] = (EXTI->EXTICR[1] & ~(0xFF << 0)) | (NSS_EXTI_PORT << 0);
 
     // Enable rising edge detection (NSS deassert = transaction end)
     EXTI->RTSR1 |= (1 << NSS_EXTI_LINE);
 
-    // Unmask interrupt for line 12
+    // Unmask interrupt for line 4
     EXTI->IMR1 |= (1 << NSS_EXTI_LINE);
 
     // Enable EXTI4_15 interrupt in NVIC (covers lines 4-15)
@@ -149,7 +158,7 @@ static void exti_nss_init(void) {
 // ============================================================================
 
 /**
- * @brief Start RX DMA: SPI2_DR → buf (peripheral → memory)
+ * @brief Start RX DMA: SPI1_DR → buf (peripheral → memory)
  *
  * @param buf Destination buffer
  * @param len Number of bytes to receive
@@ -163,7 +172,7 @@ static void spi_rx_dma_start(uint8_t *buf, uint16_t len) {
     DMA1->IFCR = DMA_IFCR_CGIF1;
 
     // Set addresses and count
-    DMA1_Channel1->CPAR  = (uint32_t)&SPI2->DR;   // Source: SPI data register
+    DMA1_Channel1->CPAR  = (uint32_t)&SPI1->DR;   // Source: SPI data register
     DMA1_Channel1->CMAR  = (uint32_t)buf;         // Destination: our buffer
     DMA1_Channel1->CNDTR = len;                   // Number of bytes
 
@@ -185,7 +194,7 @@ static void spi_rx_dma_start(uint8_t *buf, uint16_t len) {
 }
 
 /**
- * @brief Start TX DMA: buf → SPI2_DR (memory → peripheral)
+ * @brief Start TX DMA: buf → SPI1_DR (memory → peripheral)
  *
  * @param buf Source buffer
  * @param len Number of bytes to transmit
@@ -199,7 +208,7 @@ static void spi_tx_dma_start(uint8_t *buf, uint16_t len) {
     DMA1->IFCR = DMA_IFCR_CGIF2;
 
     // Set addresses and count
-    DMA1_Channel2->CPAR  = (uint32_t)&SPI2->DR;   // Destination: SPI data register
+    DMA1_Channel2->CPAR  = (uint32_t)&SPI1->DR;   // Destination: SPI data register
     DMA1_Channel2->CMAR  = (uint32_t)buf;         // Source: our buffer
     DMA1_Channel2->CNDTR = len;                   // Number of bytes
 
@@ -228,13 +237,13 @@ static void spi_clear_errors(void) {
 
     // Drain RX FIFO (up to 4 bytes deep on STM32G0)
     // FRLVL bits indicate FIFO level: 00=empty, 01=1/4, 10=1/2, 11=full
-    while (SPI2->SR & SPI_SR_FRLVL) {
+    while (SPI1->SR & SPI_SR_FRLVL) {
         // 8-bit read to pop exactly one byte
-        dummy = *(volatile uint8_t *)&SPI2->DR;
+        dummy = *(volatile uint8_t *)&SPI1->DR;
     }
 
     // Read SR to clear OVR flag
-    dummy = SPI2->SR;
+    dummy = SPI1->SR;
     (void)dummy;
 }
 
@@ -260,8 +269,8 @@ static uint8_t radio_queue_count(radio_message_queue_t *q) {
  */
 static void spi_slave_arm(void) {
     // ── Step 1: Stop everything ──
-    SPI2->CR1 &= ~SPI_CR1_SPE;  // Disable SPI (flushes FIFOs on re-enable)
-    SPI2->CR2 &= ~(SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN | SPI_CR2_RXNEIE);
+    SPI1->CR1 &= ~SPI_CR1_SPE;  // Disable SPI (flushes FIFOs on re-enable)
+    SPI1->CR2 &= ~(SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN | SPI_CR2_RXNEIE);
 
     // Disable both DMA channels
     DMA1_Channel1->CCR &= ~DMA_CCR_EN;
@@ -299,14 +308,126 @@ static void spi_slave_arm(void) {
     spi_rx_dma_start(&ctx.rx_buf[1], MAX_TRANSACTION_SIZE - 1);
 
     // ── Step 6: Configure SPI CR2 ──
-    SPI2->CR2 = (7 << SPI_CR2_DS_Pos)    // 8-bit data frames
+    SPI1->CR2 = (7 << SPI_CR2_DS_Pos)    // 8-bit data frames
               | SPI_CR2_FRXTH            // 1-byte FIFO threshold
               | SPI_CR2_RXNEIE           // RXNE interrupt for command byte
               | SPI_CR2_TXDMAEN;         // TX DMA active from start
     // Note: RXDMAEN deliberately OFF - enabled after RXNE ISR
 
     // ── Step 7: Enable SPI ──
-    SPI2->CR1 |= SPI_CR1_SPE;
+    SPI1->CR1 |= SPI_CR1_SPE;
+}
+
+/**
+ * @brief Arm SPI slave for push mode transaction
+ *
+ * Similar to spi_slave_arm() but configured for push mode:
+ * - TX DMA loaded with [TYPE:1][PAYLOAD:N]
+ * - RX DMA armed to capture any incoming master data
+ * - Both TX and RX DMA enabled from the start
+ * - No RXNEIE (we're not waiting for a command byte)
+ */
+static void spi_slave_arm_push(void) {
+    // ── Step 1: Stop everything ──
+    SPI1->CR1 &= ~SPI_CR1_SPE;
+    SPI1->CR2 &= ~(SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN | SPI_CR2_RXNEIE);
+
+    // Disable both DMA channels
+    DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+    DMA1_Channel2->CCR &= ~DMA_CCR_EN;
+
+    // Clear all DMA flags
+    DMA1->IFCR = DMA_IFCR_CGIF1 | DMA_IFCR_CGIF2;
+
+    // Clear SPI error flags
+    spi_clear_errors();
+
+    // ── Step 2: Clear RX buffer ──
+    memset(ctx.rx_buf, 0x00, sizeof(ctx.rx_buf));
+
+    // ── Step 3: Start TX DMA with the prepared push data ──
+    // tx_buf was already loaded by spi_slave_prepare_push()
+    spi_tx_dma_start(ctx.tx_buf, ctx.tx_dma_length);
+
+    // ── Step 4: Start RX DMA to capture full transaction ──
+    // RX captures everything master sends (could be dummy bytes or radio TX)
+    spi_rx_dma_start(ctx.rx_buf, MAX_TRANSACTION_SIZE);
+
+    // ── Step 5: Configure SPI CR2 for push mode ──
+    // Both TX and RX DMA enabled from the start
+    // No RXNEIE - we're not waiting for a command byte
+    SPI1->CR2 = (7 << SPI_CR2_DS_Pos)    // 8-bit data frames
+              | SPI_CR2_FRXTH            // 1-byte FIFO threshold
+              | SPI_CR2_TXDMAEN          // TX DMA enabled
+              | SPI_CR2_RXDMAEN;         // RX DMA enabled
+
+    // ── Step 6: Enable SPI ──
+    SPI1->CR1 |= SPI_CR1_SPE;
+
+    // ── Step 7: Update state ──
+    ctx.state = SPI_STATE_HAVE_DATA;
+    ctx.payload_processed = false;
+}
+
+/**
+ * @brief Prepare TX buffer for push and arm DMAs
+ *
+ * Loads the TX buffer with [TYPE:1][PAYLOAD:N] and configures
+ * DMAs for the push transaction.
+ *
+ * @param push_type PUSH_TYPE_RADIO or PUSH_TYPE_GPS
+ */
+static void spi_slave_prepare_push(uint8_t push_type) {
+    // Zero the TX buffer first
+    memset(ctx.tx_buf, 0x00, sizeof(ctx.tx_buf));
+
+    ctx.pending_push_type = push_type;
+
+    switch (push_type) {
+    case PUSH_TYPE_RADIO: {
+        // Load type byte
+        ctx.tx_buf[0] = PUSH_TYPE_RADIO;
+
+        // Load payload from queue (peek, don't dequeue yet)
+        // Use tail pointer for FIFO behavior (push oldest message first)
+        uint8_t *msg_ptr;
+        if (radio_message_queue_tail_pointer(ctx.radio_queue, &msg_ptr)) {
+            memcpy(&ctx.tx_buf[PUSH_TYPE_BYTES], msg_ptr, PUSH_RADIO_PAYLOAD);
+        }
+
+        // Set TX length: type byte + radio payload
+        ctx.tx_dma_length = PUSH_RADIO_TOTAL;  // 1 + 256 = 257
+        break;
+    }
+
+    case PUSH_TYPE_GPS: {
+        // Load type byte
+        ctx.tx_buf[0] = PUSH_TYPE_GPS;
+
+        // TODO: Uncomment when GPS driver is implemented
+        // Load GPS fix data
+        // const gps_fix_t *fix = gps_get_fix_ptr();
+        // if (fix) {
+        //     memcpy(&ctx.tx_buf[PUSH_TYPE_BYTES], fix, sizeof(gps_fix_t));
+        // }
+        // Mark fix as consumed
+        // gps_clear_fix();
+
+        // Set TX length: type byte + GPS payload
+        ctx.tx_dma_length = PUSH_GPS_TOTAL;  // 1 + 48 = 49
+        break;
+    }
+
+    default:
+        // Unknown push type - don't arm
+        return;
+    }
+
+    // Arm DMAs for push transaction
+    spi_slave_arm_push();
+
+    // Assert IRQ to notify master
+    spi_slave_assert_irq();
 }
 
 // ============================================================================
@@ -314,7 +435,7 @@ static void spi_slave_arm(void) {
 // ============================================================================
 
 /**
- * @brief SPI2 RXNE Interrupt Handler
+ * @brief SPI1 RXNE Interrupt Handler
  *
  * This fires when the first byte (command) arrives and RXNE flag is set.
  * This is the heart of the hybrid design:
@@ -325,20 +446,20 @@ static void spi_slave_arm(void) {
  *
  * All of this must complete within 4 byte-times (the dummy byte window).
  */
-void spi_slave_spi2_irq_handler(void) {
+void spi_slave_spi1_irq_handler(void) {
     // Verify this is an RXNE interrupt
-    if ((SPI2->SR & SPI_SR_RXNE) && (SPI2->CR2 & SPI_CR2_RXNEIE)) {
+    if ((SPI1->SR & SPI_SR_RXNE) && (SPI1->CR2 & SPI_CR2_RXNEIE)) {
 
         // ── Read command byte ──
         // CRITICAL: 8-bit read to pop exactly one byte from RX FIFO
         // This also clears the RXNE flag
-        uint8_t cmd = *(volatile uint8_t *)&SPI2->DR;
+        uint8_t cmd = *(volatile uint8_t *)&SPI1->DR;
         ctx.current_cmd = cmd;
         ctx.rx_buf[0] = cmd;
 
         // ── Disable RXNE interrupt ──
         // We got the command. Don't want RXNE firing for every subsequent byte.
-        SPI2->CR2 &= ~SPI_CR2_RXNEIE;
+        SPI1->CR2 &= ~SPI_CR2_RXNEIE;
 
         // ── Process command and patch TX buffer ──
         // The master is clocking dummy bytes 1-4 right now.
@@ -406,7 +527,7 @@ void spi_slave_spi2_irq_handler(void) {
         // This is the critical handoff from interrupt-driven to DMA-driven.
         // From this point on, all incoming bytes trigger DMA requests instead
         // of RXNE interrupts. The DMA silently handles all remaining bytes.
-        SPI2->CR2 |= SPI_CR2_RXDMAEN;
+        SPI1->CR2 |= SPI_CR2_RXDMAEN;
 
         ctx.state = SPI_STATE_ACTIVE;
     }
@@ -450,16 +571,19 @@ void spi_slave_dma1_ch1_irq_handler(void) {
 }
 
 /**
- * @brief NSS EXTI Handler (line 12)
+ * @brief NSS EXTI Handler (line 4, PA4)
  *
- * Fires when NSS rising edge detected (line 12).
+ * Fires when NSS rising edge detected.
  * This is the universal "transaction complete" signal.
- * Handles both full transactions (DMA TC fired) and short transactions
- * (master ended early).
+ *
+ * Handles:
+ * - Pull mode: command-based transactions (SPI_STATE_ACTIVE)
+ * - Push mode: IRQ-initiated transactions (SPI_STATE_HAVE_DATA)
+ * - Simultaneous TX/RX in push mode (checks RX pattern for master TX)
  */
 void spi_slave_nss_exti_handler(void) {
 
-    // Check if this is NSS line 12 rising edge
+    // Check if this is NSS rising edge (line 4)
     if (EXTI->RPR1 & (1 << NSS_EXTI_LINE)) {
         // Clear pending flag (write 1 to clear)
         EXTI->RPR1 = (1 << NSS_EXTI_LINE);
@@ -472,8 +596,56 @@ void spi_slave_nss_exti_handler(void) {
             // Glitch or aborted transaction. Just re-arm.
             break;
 
+        case SPI_STATE_HAVE_DATA:
+            // ══════════════════════════════════════════════════════════════
+            // PUSH MODE TRANSACTION COMPLETE
+            // ══════════════════════════════════════════════════════════════
+            // We asserted IRQ, master responded, transaction complete.
+
+            // Deassert IRQ first
+            spi_slave_deassert_irq();
+
+            // Check how many bytes we actually transmitted
+            {
+                uint16_t tx_remaining = DMA1_Channel2->CNDTR;
+                uint16_t tx_sent = ctx.tx_dma_length - tx_remaining;
+
+                // If we sent at least the type byte + some payload, consider it success
+                if (tx_sent >= PUSH_TYPE_BYTES) {
+                    // Pop the message from queue since it was transmitted
+                    if (ctx.pending_push_type == PUSH_TYPE_RADIO && ctx.radio_queue) {
+                        radio_message_queue_pop(ctx.radio_queue);
+                    }
+                    // GPS fix doesn't need to be popped - it's a single value
+
+                    ctx.push_transactions++;
+                }
+
+                // Check if master sent data while we were pushing (simultaneous TX/RX)
+                uint16_t rx_remaining = DMA1_Channel1->CNDTR;
+                uint16_t rx_received = MAX_TRANSACTION_SIZE - rx_remaining;
+
+                // If we received a substantial amount and it looks like real data...
+                if (rx_received >= PUSH_RADIO_PAYLOAD && spi_slave_rx_has_valid_data()) {
+                    // Master sent a radio TX message simultaneously!
+                    // Enqueue it to the radio queue
+                    if (ctx.radio_queue) {
+                        radio_message_enqueue(PUSH_RADIO_PAYLOAD, ctx.rx_buf, ctx.radio_queue);
+                        ctx.master_tx_received++;
+                    }
+                }
+            }
+
+            ctx.pending_push_type = 0;
+            ctx.transactions_completed++;
+            break;
+
         case SPI_STATE_ACTIVE:
-            // Normal transaction end.
+            // ══════════════════════════════════════════════════════════════
+            // PULL MODE TRANSACTION COMPLETE
+            // ══════════════════════════════════════════════════════════════
+            // Master initiated with command byte, DMA handled the rest.
+
             // For write commands, check if we got the full payload.
             if (ctx.current_cmd == CMD_RADIO_TX && !ctx.payload_processed) {
                 // Check how many bytes actually transferred
@@ -502,7 +674,7 @@ void spi_slave_nss_exti_handler(void) {
             }
 
             // Check for overrun errors
-            if (SPI2->SR & SPI_SR_OVR) {
+            if (SPI1->SR & SPI_SR_OVR) {
                 ctx.overrun_errors++;
             }
 
@@ -539,7 +711,7 @@ void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_
     // ── Enable peripheral clocks ──
     RCC->IOPENR  |= RCC_IOPENR_GPIOBEN;    // GPIO port B
     RCC->AHBENR  |= RCC_AHBENR_DMA1EN;     // DMA1
-    RCC->APBENR1 |= RCC_APBENR1_SPI2EN;    // SPI2
+    RCC->APBENR2 |= RCC_APBENR2_SPI1EN;    // SPI1 (on APB2, not APB1!)
 
     // ── Initialize peripherals ──
     spi_gpio_init();
@@ -548,10 +720,9 @@ void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_
     exti_nss_init();
 
     // ── Enable interrupts in NVIC ──
-    // SPI2/3 RXNE interrupt (highest priority - must respond fast)
-    // STM32G0B1 has combined SPI2_3_IRQn
-    NVIC_SetPriority(SPI2_3_IRQn, 0);
-    NVIC_EnableIRQ(SPI2_3_IRQn);
+    // SPI1 RXNE interrupt (highest priority - must respond fast)
+    NVIC_SetPriority(SPI1_IRQn, 0);
+    NVIC_EnableIRQ(SPI1_IRQn);
 
     // DMA1 Channel 1 interrupt (high priority)
     NVIC_SetPriority(DMA1_Channel1_IRQn, 1);
@@ -584,28 +755,87 @@ void spi_slave_reset_errors(void) {
     ctx.overrun_errors = 0;
     ctx.transfer_errors = 0;
     ctx.unknown_commands = 0;
-    ctx.collisions_detected = 0;
+    ctx.master_tx_received = 0;
 }
 
 // ============================================================================
-// PUSH MODE STUBS (for future implementation)
+// PUSH MODE IMPLEMENTATION
 // ============================================================================
 
+/**
+ * @brief Assert IRQ line to master (active low)
+ *
+ * Sets PB2 low to signal the master that data is ready.
+ * The IRQ pin is active-low, open-drain compatible.
+ */
 void spi_slave_assert_irq(void) {
-    // TODO: Implement when push mode is enabled
-    // HAL_GPIO_WritePin(IRQ_GPIO_PORT, IRQ_GPIO_PIN, GPIO_PIN_RESET);
-    // ctx.irq_asserted = true;
-    // ctx.irq_assert_timestamp = get_time_us();
+    // BSRR lower 16 bits set the pin, upper 16 bits reset (clear) the pin
+    // To drive low (active), we write to the reset bits (upper half)
+    GPIOB->BSRR = IRQ_GPIO_PIN << 16;  // Reset = low = active
+    ctx.irq_asserted = true;
 }
 
+/**
+ * @brief Deassert IRQ line to master (inactive high)
+ *
+ * Sets PB2 high to release the IRQ line.
+ */
 void spi_slave_deassert_irq(void) {
-    // TODO: Implement when push mode is enabled
-    // HAL_GPIO_WritePin(IRQ_GPIO_PORT, IRQ_GPIO_PIN, GPIO_PIN_SET);
-    // ctx.irq_asserted = false;
+    // Write to set bits (lower half) to drive high
+    GPIOB->BSRR = IRQ_GPIO_PIN;  // Set = high = inactive
+    ctx.irq_asserted = false;
 }
 
+/**
+ * @brief Check if RX buffer contains valid data (not dummy bytes)
+ *
+ * Samples the first RX_PATTERN_SAMPLE_SIZE bytes and checks if they
+ * appear to be real data vs dummy bytes (all 0x00 or 0xFF).
+ *
+ * @return true if RX buffer appears to contain real radio message data
+ */
+bool spi_slave_rx_has_valid_data(void) {
+    uint8_t zeros = 0;
+    uint8_t ones = 0;
+
+    // Sample the first few bytes of the RX buffer
+    for (int i = 0; i < RX_PATTERN_SAMPLE_SIZE; i++) {
+        if (ctx.rx_buf[i] == 0x00) zeros++;
+        if (ctx.rx_buf[i] == 0xFF) ones++;
+    }
+
+    // If most bytes are 0x00 or 0xFF, it's probably dummy data
+    // Real radio messages typically have varied content
+    return (zeros < RX_PATTERN_THRESHOLD && ones < RX_PATTERN_THRESHOLD);
+}
+
+/**
+ * @brief Periodic tick function for push mode
+ *
+ * Call this from the main loop. When data is available and the slave
+ * is idle, this prepares the TX buffer, arms DMAs, and asserts IRQ.
+ */
 void spi_slave_tick(void) {
-    // TODO: Implement when push mode is enabled
-    // Check for pending data in queues
-    // If data available and state == IDLE, assert IRQ
+    // Only process if we're idle (not mid-transaction)
+    if (ctx.state != SPI_STATE_IDLE) {
+        return;
+    }
+
+    // Already have IRQ asserted and waiting for master
+    if (ctx.irq_asserted) {
+        return;
+    }
+
+    // Check for pending radio message to push
+    if (ctx.radio_queue && !radio_message_queue_empty(ctx.radio_queue)) {
+        spi_slave_prepare_push(PUSH_TYPE_RADIO);
+        return;
+    }
+
+    // TODO: Uncomment when GPS driver is implemented
+    // Check for pending GPS fix to push
+    // if (gps_fix_available()) {
+    //     spi_slave_prepare_push(PUSH_TYPE_GPS);
+    //     return;
+    // }
 }

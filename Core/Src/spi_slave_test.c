@@ -100,7 +100,8 @@ void spi_test_print_status(void) {
     printf("  Overrun Errors: %lu\n", ctx->overrun_errors);
     printf("  Transfer Errors: %lu\n", ctx->transfer_errors);
     printf("  Unknown Commands: %lu\n", ctx->unknown_commands);
-    printf("  Collisions: %lu\n", ctx->collisions_detected);
+    printf("  Master TX Received: %lu\n", ctx->master_tx_received);
+    printf("  Push Transactions: %lu\n", ctx->push_transactions);
     printf("  IRQ Asserted: %s\n", ctx->irq_asserted ? "YES" : "NO");
     printf("========================\n\n");
 }

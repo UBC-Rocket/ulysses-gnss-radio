@@ -14,6 +14,7 @@
 /* USER CODE BEGIN Includes */
 #include "spi_slave.h"
 #include "radio_driver.h"
+// #include "gps_driver.h"  // TODO: Add when GPS driver is implemented
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,8 +48,8 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-// extern DMA_HandleTypeDef hdma_spi1_tx;  // Not used - SPI slave uses register-level SPI2
-// extern DMA_HandleTypeDef hdma_spi1_rx;  // Not used - SPI slave uses register-level SPI2
+extern DMA_HandleTypeDef hdma_spi1_tx;
+extern DMA_HandleTypeDef hdma_spi1_rx;
 extern UART_HandleTypeDef huart5;
 extern UART_HandleTypeDef huart6;
 /* USER CODE BEGIN EV */
@@ -141,10 +142,11 @@ void SysTick_Handler(void)
 void DMA1_Channel1_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel1_IRQn 0 */
-  // SPI2 RX DMA handler (for SPI slave)
+  // SPI2 RX DMA handler (for SPI slave) - we handle DMA ourselves
   spi_slave_dma1_ch1_irq_handler();
+  return;  // Skip HAL handler - we use register-level DMA
   /* USER CODE END DMA1_Channel1_IRQn 0 */
-  // HAL_DMA_IRQHandler(&hdma_spi1_tx);  // Disabled - not using HAL SPI1
+  HAL_DMA_IRQHandler(&hdma_spi1_tx);
   /* USER CODE BEGIN DMA1_Channel1_IRQn 1 */
 
   /* USER CODE END DMA1_Channel1_IRQn 1 */
@@ -156,10 +158,11 @@ void DMA1_Channel1_IRQHandler(void)
 void DMA1_Channel2_3_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel2_3_IRQn 0 */
-  // SPI2 TX DMA uses channel 2, but we don't need an interrupt handler for it
+  // SPI2 TX DMA uses channel 2 - we handle DMA ourselves
   // (we don't care about TX completion - NSS rising edge handles transaction end)
+  return;  // Skip HAL handler - we use register-level DMA
   /* USER CODE END DMA1_Channel2_3_IRQn 0 */
-  // HAL_DMA_IRQHandler(&hdma_spi1_rx);  // Disabled - not using HAL SPI1
+  HAL_DMA_IRQHandler(&hdma_spi1_rx);
   /* USER CODE BEGIN DMA1_Channel2_3_IRQn 1 */
 
   /* USER CODE END DMA1_Channel2_3_IRQn 1 */
@@ -177,6 +180,13 @@ void USART3_4_5_6_LPUART1_IRQHandler(void)
       uint8_t byte = (uint8_t)(huart5.Instance->RDR);
       radio_rx_byte_handler(byte);
   }
+
+  // TODO: Handle GPS UART (USART6) RX when GPS driver is implemented
+  // if (huart6.Instance->ISR & USART_ISR_RXNE_RXFNE)
+  // {
+  //     uint8_t byte = (uint8_t)(huart6.Instance->RDR);
+  //     gps_rx_byte_handler(byte);
+  // }
   /* USER CODE END USART3_4_5_6_LPUART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart5);
   HAL_UART_IRQHandler(&huart6);
@@ -188,29 +198,29 @@ void USART3_4_5_6_LPUART1_IRQHandler(void)
 /* USER CODE BEGIN 1 */
 
 /**
-  * @brief This function handles SPI2/SPI3 global interrupt.
+  * @brief This function handles SPI1 global interrupt.
   *
-  * SPI2 is used for the SPI slave (GNSS/Radio board).
+  * SPI1 is used for the SPI slave (GNSS/Radio board).
   * RXNE interrupt captures the command byte.
-  * STM32G0B1 has combined SPI2_3_IRQn
   */
-void SPI2_3_IRQHandler(void)
+void SPI1_IRQHandler(void)
 {
-  spi_slave_spi2_irq_handler();
+  spi_slave_spi1_irq_handler();
 }
 
 /**
   * @brief This function handles EXTI line 4 to 15 interrupts.
   *
-  * PB12 (SPI2_NSS) is configured as EXTI12 for transaction end detection.
+  * PA4 (SPI1_NSS) is configured as EXTI4 for transaction end detection.
   */
 void EXTI4_15_IRQHandler(void)
 {
   /* USER CODE BEGIN EXTI4_15_IRQn 0 */
-  // SPI2 NSS rising edge handler (for SPI slave transaction end)
+  // SPI1 NSS rising edge handler (for SPI slave transaction end)
   spi_slave_nss_exti_handler();
+  return;
   /* USER CODE END EXTI4_15_IRQn 0 */
-  // HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_4);  // Disabled - not using HAL SPI1
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_4);
   /* USER CODE BEGIN EXTI4_15_IRQn 1 */
 
   /* USER CODE END EXTI4_15_IRQn 1 */

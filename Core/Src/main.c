@@ -116,28 +116,33 @@ int main(void)
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-  // Initialize GPS queue
+  // Initialize GPS queue (for raw NMEA in pull mode)
   gps_sample_queue_init(&gps_sample_queue);
 
   // Initialize radio driver (handles its own queue initialization)
   radio_init(&radio_rx_queue);
 
-  // Initialize SPI slave (uses radio queue for SPI master access)
+  // Initialize SPI slave (uses radio queue and GPS queue)
   spi_slave_init(&radio_rx_queue, &gps_sample_queue);
 
-  // Enable debug UART forwarding
-  HAL_UART_Receive_IT(&huart1, debug_rx_buffer, 1);
+  // Enable UART RX interrupts
+  HAL_UART_Receive_IT(&huart1, debug_rx_buffer, 1);  // Debug UART
 
-  HAL_UART_Transmit(&huart1, (uint8_t*)"System ready\r\n", 14, 100);
+  HAL_UART_Transmit(&huart1, (uint8_t*)"System ready (push mode)\r\n", 26, 100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-      /* USER CODE BEGIN 3 */
+    /* USER CODE END WHILE */
 
-      // Check if radio message received
+    /* USER CODE BEGIN 3 */
+
+      // Push mode tick - check for pending data and assert IRQ if needed
+      spi_slave_tick();
+
+      // Check if radio message received (for debug output)
       if (radio_available()) {
           uint8_t msg[RADIO_MAX_MESSAGE_LEN];
           uint8_t len = radio_read(msg);
@@ -150,10 +155,10 @@ int main(void)
           }
       }
       
-      HAL_Delay(10);
-      /* USER CODE END 3 */
+      HAL_Delay(1);  // Reduced delay for faster push response
+    /* USER CODE END 3 */
   }
-  /* USER CODE END 3 */
+  /* USER CODE END WHILE */
 }
 
 /**
@@ -215,7 +220,7 @@ static void MX_SPI1_Init(void)
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_SLAVE;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT; // TODO 4 bit? why not 8-bit
+  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_HARD_INPUT;
