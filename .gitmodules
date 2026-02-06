@@ -1,0 +1,3 @@
+[submodule "lib/lwgps"]
+	path = lib/lwgps
+	url = https://github.com/MaJerle/lwgps.git

@@ -15,6 +15,9 @@
 
 #include "gps.h"
 #include "gps_nema_queue.h"
+#include "gps_fix_queue.h"
+#include "protocol_config.h"
+#include "lwgps/lwgps.h"
 #include <stdbool.h>
 #include <string.h>
 
@@ -47,8 +50,20 @@ static uint8_t s_line[GPS_NMEA_MAX];
 static uint16_t s_line_len = 0;
 static bool s_in_sentence = false;
 
-/** Shared GPS queue for SPI push mode */
+/** Shared GPS queue for SPI push/pull mode (raw NMEA) */
 static gps_sample_queue_t *s_gps_queue = NULL;
+
+/** Shared GPS fix queue for push mode (parsed fixes) */
+static gps_fix_queue_t *s_gps_fix_queue = NULL;
+
+/** lwgps parser instance */
+static lwgps_t s_lwgps;
+
+/** Parsed fix for push mode */
+static gps_fix_t s_parsed_fix;
+
+/** Current protocol mode (PULL = raw NMEA, PUSH = parsed fix) */
+static spi_protocol_mode_t s_protocol_mode = SPI_MODE_PULL;
 
 /** Debug output state */
 static volatile bool s_out_tx_busy = false;
@@ -63,6 +78,7 @@ static void process_dma_data(uint16_t new_pos);
 static void feed_byte(uint8_t b);
 static void nmea_reset(void);
 static void out_try_start_tx(void);
+static void populate_gps_fix(gps_fix_t *fix, const lwgps_t *gps);
 
 /* ============================================================================
  * Public API
@@ -71,6 +87,16 @@ static void out_try_start_tx(void);
 void gps_set_queue(gps_sample_queue_t *queue)
 {
     s_gps_queue = queue;
+}
+
+void gps_set_fix_queue(gps_fix_queue_t *queue)
+{
+    s_gps_fix_queue = queue;
+}
+
+void gps_set_protocol_mode(spi_protocol_mode_t mode)
+{
+    s_protocol_mode = mode;
 }
 
 void gps_init(UART_HandleTypeDef *gps_uart, UART_HandleTypeDef *out_uart)
@@ -87,6 +113,10 @@ void gps_init(UART_HandleTypeDef *gps_uart, UART_HandleTypeDef *out_uart)
 
     memset(s_dma_buf, 0, sizeof(s_dma_buf));
     memset(s_line, 0, sizeof(s_line));
+    memset(&s_parsed_fix, 0, sizeof(s_parsed_fix));
+
+    /* Initialize lwgps parser */
+    lwgps_init(&s_lwgps);
 
     /* Start DMA receive with IDLE line detection */
     if (s_gps) {
@@ -213,12 +243,19 @@ static void process_dma_data(uint16_t new_pos)
 /**
  * @brief Feed one byte to NMEA sentence builder
  *
- * Accumulates bytes into complete NMEA sentences and enqueues them.
+ * Accumulates bytes into complete NMEA sentences.
+ * In PUSH mode: parses with lwgps and enqueues parsed fix
+ * In PULL mode: enqueues raw NMEA sentence
  *
  * @param b Received byte
  */
 static void feed_byte(uint8_t b)
 {
+    /* Feed byte to lwgps parser if in PUSH mode */
+    if (s_protocol_mode == SPI_MODE_PUSH) {
+        lwgps_process(&s_lwgps, &b, 1);
+    }
+
     /* Wait for '$' to start a new sentence */
     if (!s_in_sentence) {
         if (b == '$') {
@@ -245,9 +282,20 @@ static void feed_byte(uint8_t b)
             s_line[s_line_len] = '\0';
         }
 
-        /* Enqueue to SPI push queue */
-        if (s_gps_queue != NULL) {
-            gps_sample_enqueue(s_line, s_gps_queue);
+        /* Mode-specific enqueuing */
+        if (s_protocol_mode == SPI_MODE_PULL) {
+            /* PULL MODE: Enqueue raw NMEA sentence */
+            if (s_gps_queue != NULL) {
+                gps_sample_enqueue(s_line, s_gps_queue);
+            }
+        } else if (s_protocol_mode == SPI_MODE_PUSH) {
+            /* PUSH MODE: Enqueue parsed fix if valid */
+            if (lwgps_is_valid(&s_lwgps) == 1) {
+                populate_gps_fix(&s_parsed_fix, &s_lwgps);
+                if (s_gps_fix_queue != NULL) {
+                    gps_fix_enqueue(&s_parsed_fix, s_gps_fix_queue);
+                }
+            }
         }
 
         /* Debug output to UART1 */
@@ -284,4 +332,43 @@ static void out_try_start_tx(void)
     if (HAL_UART_Transmit_IT(s_out, s_out_tx_buf, s_out_tx_len) != HAL_OK) {
         s_out_tx_busy = false;
     }
+}
+
+/**
+ * @brief Populate gps_fix_t structure from lwgps parsed data
+ *
+ * Maps lwgps fields to protocol-defined gps_fix_t structure.
+ * Handles unit conversions (knots to m/s).
+ *
+ * @param fix Destination gps_fix_t structure
+ * @param gps Source lwgps parser instance
+ */
+static void populate_gps_fix(gps_fix_t *fix, const lwgps_t *gps)
+{
+    /* Position */
+    fix->latitude = gps->latitude;
+    fix->longitude = gps->longitude;
+    fix->altitude_msl = gps->altitude;
+
+    /* Velocity & Heading */
+    /* Note: lwgps speed is in knots, convert to m/s */
+    fix->ground_speed = gps->speed * 0.514444f;  // knots to m/s
+    fix->course = gps->course;
+
+    /* Quality indicators */
+    fix->fix_quality = (uint8_t)gps->fix;  // 0=invalid, 1=GPS, 2=DGPS
+    fix->num_satellites = gps->sats_in_use;
+    fix->hdop = gps->dop_h;
+
+    /* Timestamp - milliseconds since midnight UTC */
+    /* Note: GPS time of week requires GPS week number and leap seconds */
+    /* Using simplified approach: milliseconds since midnight UTC */
+    fix->time_of_week_ms = ((uint32_t)gps->hours * 3600 +
+                             (uint32_t)gps->minutes * 60 +
+                             (uint32_t)gps->seconds) * 1000;
+
+    /* Clear padding for deterministic SPI transfers */
+    fix->padding1[0] = 0;
+    fix->padding1[1] = 0;
+    memset(fix->padding2, 0, sizeof(fix->padding2));
 }

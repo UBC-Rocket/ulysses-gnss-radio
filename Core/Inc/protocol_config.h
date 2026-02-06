@@ -55,10 +55,10 @@ typedef enum {
 // Push mode transaction sizes (TYPE + PAYLOAD)
 #define PUSH_TYPE_BYTES          1
 #define PUSH_RADIO_PAYLOAD       256
-#define PUSH_GPS_PAYLOAD         87   // Raw NMEA sentence (82 chars + margin)
+#define PUSH_GPS_PAYLOAD         48   // Parsed gps_fix_t structure (sizeof(gps_fix_t))
 
 #define PUSH_RADIO_TOTAL         (PUSH_TYPE_BYTES + PUSH_RADIO_PAYLOAD)  // 257
-#define PUSH_GPS_TOTAL           (PUSH_TYPE_BYTES + PUSH_GPS_PAYLOAD)    // 88
+#define PUSH_GPS_TOTAL           (PUSH_TYPE_BYTES + PUSH_GPS_PAYLOAD)    // 49
 
 // Maximum transaction size (for buffer allocation)
 #define MAX_TRANSACTION_SIZE     PULL_RADIO_TOTAL  // 261 bytes

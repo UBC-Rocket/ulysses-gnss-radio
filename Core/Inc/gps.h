@@ -10,6 +10,8 @@
 
 #include "stm32g0xx_hal.h"
 #include "gps_nema_queue.h"
+#include "gps_fix_queue.h"
+#include "protocol_config.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -24,10 +26,22 @@ extern "C" {
  * ============================================================================ */
 
 /**
- * @brief Set the GPS sample queue for SPI push mode
+ * @brief Set the GPS sample queue for SPI push/pull mode (raw NMEA)
  * @param queue Pointer to shared GPS sample queue
  */
 void gps_set_queue(gps_sample_queue_t *queue);
+
+/**
+ * @brief Set the GPS fix queue for SPI push mode (parsed fixes)
+ * @param queue Pointer to shared GPS fix queue
+ */
+void gps_set_fix_queue(gps_fix_queue_t *queue);
+
+/**
+ * @brief Set the GPS protocol mode (PULL = raw NMEA, PUSH = parsed fix)
+ * @param mode Protocol mode from protocol_config.h
+ */
+void gps_set_protocol_mode(spi_protocol_mode_t mode);
 
 /**
  * @brief Initialize GPS driver with DMA reception

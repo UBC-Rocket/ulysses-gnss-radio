@@ -50,12 +50,18 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/radio_driver.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/gps.c
     # ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/timing_utils.c  # Requires HAL_TIM - enable when needed
+
+    # lwgps library
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib/lwgps/lwgps/src/lwgps/lwgps.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc
+
+    # lwgps headers
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib/lwgps/lwgps/src/include
 )
 
 # Add project symbols (macros)
