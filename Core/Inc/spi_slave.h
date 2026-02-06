@@ -7,13 +7,13 @@
  *
  * Hardware Configuration:
  * - SPI1 on PA4(NSS), PA5(SCK), PA6(MISO), PA7(MOSI)
- * - IRQ output on PB2 (active low, for push mode)
+ * - IRQ output on PB2 (active high, directly driving GPIO for push mode)
  * - DMA1 Channel 1 (RX), Channel 2 (TX)
  * - EXTI line 4 for NSS transaction end detection
  *
  * Protocol:
  * - Pull mode: Master sends [CMD:1][DUMMY:4][PAYLOAD:0-256]
- * - Push mode: Slave asserts IRQ, sends [TYPE:1][PAYLOAD:N]
+ * - Push mode: Slave asserts IRQ (high), sends [TYPE:1][PAYLOAD:N]
  */
 
 #include <stdint.h>
@@ -184,7 +184,7 @@ void spi_slave_nss_exti_handler(void);
 /**
  * @brief Assert IRQ line to master (push mode)
  *
- * Sets PB2 low (active low, open-drain) to signal the master that
+ * Sets PB2 high (active high) to signal the master that
  * the slave has data ready to send.
  */
 void spi_slave_assert_irq(void);
@@ -192,7 +192,7 @@ void spi_slave_assert_irq(void);
 /**
  * @brief Deassert IRQ line to master (push mode)
  *
- * Sets PB2 high (inactive) after transaction completes.
+ * Sets PB2 low (inactive) after transaction completes.
  */
 void spi_slave_deassert_irq(void);
 

@@ -4,7 +4,7 @@
  *
  * Hardware Configuration:
  * - SPI1 on PA4(NSS), PA5(SCK), PA6(MISO), PA7(MOSI)
- * - IRQ output on PB2 (active low, for push mode)
+ * - IRQ output on PB2 (active high, for push mode)
  * - DMA1 Channel 1 (RX), Channel 2 (TX)
  *
  * Implements hybrid RXNE interrupt + DMA approach:
@@ -82,9 +82,10 @@ static void spi_gpio_init(void) {
                     | (SPI_AF_NUM << (6*4))    // MISO
                     | (SPI_AF_NUM << (7*4));   // MOSI
 
-    // Configure IRQ pin (PB2) for push mode - output, initially high (inactive)
+    // Configure IRQ pin (PB2) for push mode - output, initially low (inactive)
+    // Active high: low = no data, high = data ready
     GPIOB->MODER = (GPIOB->MODER & ~(3 << (2*2))) | (1 << (2*2));  // Output mode
-    GPIOB->BSRR = IRQ_GPIO_PIN;  // Set high (inactive)
+    GPIOB->BSRR = IRQ_GPIO_PIN << 16;  // Reset = low (inactive)
 }
 
 /**
@@ -763,26 +764,26 @@ void spi_slave_reset_errors(void) {
 // ============================================================================
 
 /**
- * @brief Assert IRQ line to master (active low)
+ * @brief Assert IRQ line to master (active high)
  *
- * Sets PB2 low to signal the master that data is ready.
- * The IRQ pin is active-low, open-drain compatible.
+ * Sets PB2 high to signal the master that data is ready.
+ * The IRQ pin is active-high for rising edge detection on master.
  */
 void spi_slave_assert_irq(void) {
     // BSRR lower 16 bits set the pin, upper 16 bits reset (clear) the pin
-    // To drive low (active), we write to the reset bits (upper half)
-    GPIOB->BSRR = IRQ_GPIO_PIN << 16;  // Reset = low = active
+    // To drive high (active), we write to the set bits (lower half)
+    GPIOB->BSRR = IRQ_GPIO_PIN;  // Set = high = active
     ctx.irq_asserted = true;
 }
 
 /**
- * @brief Deassert IRQ line to master (inactive high)
+ * @brief Deassert IRQ line to master (inactive low)
  *
- * Sets PB2 high to release the IRQ line.
+ * Sets PB2 low to release the IRQ line.
  */
 void spi_slave_deassert_irq(void) {
-    // Write to set bits (lower half) to drive high
-    GPIOB->BSRR = IRQ_GPIO_PIN;  // Set = high = inactive
+    // Write to reset bits (upper half) to drive low
+    GPIOB->BSRR = IRQ_GPIO_PIN << 16;  // Reset = low = inactive
     ctx.irq_asserted = false;
 }
 
