@@ -47,6 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/spi_slave.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/spi_slave_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/radio_driver.c
     # ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/timing_utils.c  # Requires HAL_TIM - enable when needed
 )
 
