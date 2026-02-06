@@ -15,6 +15,7 @@
 #include "gps_nema_queue.h"
 #include "spi_slave.h"
 #include "radio_driver.h"
+#include "gps.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -64,6 +65,32 @@ static void MX_USART6_UART_Init(void);
 // Debug UART forwarding (UART1 -> Radio for testing)
 static uint8_t debug_rx_buffer[1];
 
+/**
+ * @brief DMA RX Event callback for IDLE/HT/TC events
+ *
+ * This is the main receive handler for DMA + IDLE mode.
+ * Routes events to GPS (UART6) and Radio (UART5) drivers.
+ */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+    if (huart->Instance == USART6)
+    {
+        // GPS DMA event (IDLE, Half-Transfer, or Transfer-Complete)
+        gps_rx_event_callback(huart, Size);
+    }
+    else if (huart->Instance == USART5)
+    {
+        // Radio DMA event
+        radio_rx_event_callback(huart, Size);
+    }
+}
+
+/**
+ * @brief Legacy RX complete callback (for per-byte interrupt mode)
+ *
+ * Only used for UART1 debug console (which still uses per-byte).
+ * GPS and Radio now use DMA + IDLE via HAL_UARTEx_RxEventCallback.
+ */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
@@ -76,6 +103,26 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         
         // Re-enable receive interrupt for next byte
         HAL_UART_Receive_IT(&huart1, debug_rx_buffer, 1);
+    }
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    // Route to GPS driver for debug output TX completion
+    gps_uart_tx_cplt_callback(huart);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART6)
+    {
+        // GPS UART error - attempt recovery
+        gps_uart_error_callback(huart);
+    }
+    else if (huart->Instance == USART5)
+    {
+        // Radio UART error - attempt recovery
+        radio_uart_error_callback(huart);
     }
 }
 
@@ -116,8 +163,12 @@ int main(void)
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-  // Initialize GPS queue (for raw NMEA in pull mode)
+  // Initialize GPS queue (for raw NMEA)
   gps_sample_queue_init(&gps_sample_queue);
+
+  // Initialize GPS driver with shared queue
+  gps_set_queue(&gps_sample_queue);
+  gps_init(&huart6, &huart1);  // GPS on UART6, debug output on UART1
 
   // Initialize radio driver (handles its own queue initialization)
   radio_init(&radio_rx_queue);
@@ -125,8 +176,8 @@ int main(void)
   // Initialize SPI slave (uses radio queue and GPS queue)
   spi_slave_init(&radio_rx_queue, &gps_sample_queue);
 
-  // Enable UART RX interrupts
-  HAL_UART_Receive_IT(&huart1, debug_rx_buffer, 1);  // Debug UART
+  // Enable UART RX interrupts for debug console
+  HAL_UART_Receive_IT(&huart1, debug_rx_buffer, 1);
 
   HAL_UART_Transmit(&huart1, (uint8_t*)"System ready (push mode)\r\n", 26, 100);
   /* USER CODE END 2 */
@@ -138,6 +189,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+      // Process GPS UART data (builds NMEA sentences from ring buffer)
+      gps_process();
 
       // Push mode tick - check for pending data and assert IRQ if needed
       spi_slave_tick();
