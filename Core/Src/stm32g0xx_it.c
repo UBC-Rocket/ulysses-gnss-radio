@@ -50,6 +50,13 @@
 /* External variables --------------------------------------------------------*/
 extern DMA_HandleTypeDef hdma_spi1_tx;
 extern DMA_HandleTypeDef hdma_spi1_rx;
+extern DMA_HandleTypeDef hdma_usart1_tx;
+extern DMA_HandleTypeDef hdma_usart1_rx;
+extern DMA_HandleTypeDef hdma_usart5_tx;
+extern DMA_HandleTypeDef hdma_usart5_rx;
+extern DMA_HandleTypeDef hdma_usart6_tx;
+extern DMA_HandleTypeDef hdma_usart6_rx;
+extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart5;
 extern UART_HandleTypeDef huart6;
 /* USER CODE BEGIN EV */
@@ -163,9 +170,42 @@ void DMA1_Channel2_3_IRQHandler(void)
   return;  // Skip HAL handler - we use register-level DMA
   /* USER CODE END DMA1_Channel2_3_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_spi1_rx);
+  HAL_DMA_IRQHandler(&hdma_usart1_tx);
   /* USER CODE BEGIN DMA1_Channel2_3_IRQn 1 */
 
   /* USER CODE END DMA1_Channel2_3_IRQn 1 */
+}
+
+/**
+  * @brief This function handles DMA1 Ch4 to Ch7, DMA2 Ch1 to Ch5 and DMAMUX1 Overrun Interrupts.
+  */
+void DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn 0 */
+
+  /* USER CODE END DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_usart1_rx);
+  HAL_DMA_IRQHandler(&hdma_usart5_tx);
+  HAL_DMA_IRQHandler(&hdma_usart5_rx);
+  HAL_DMA_IRQHandler(&hdma_usart6_tx);
+  HAL_DMA_IRQHandler(&hdma_usart6_rx);
+  /* USER CODE BEGIN DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn 1 */
+
+  /* USER CODE END DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn 1 */
+}
+
+/**
+  * @brief This function handles USART1 global interrupt / USART1 wake-up interrupt through EXTI line 25.
+  */
+void USART1_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART1_IRQn 0 */
+
+  /* USER CODE END USART1_IRQn 0 */
+  HAL_UART_IRQHandler(&huart1);
+  /* USER CODE BEGIN USART1_IRQn 1 */
+
+  /* USER CODE END USART1_IRQn 1 */
 }
 
 /**

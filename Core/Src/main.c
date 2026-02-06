@@ -16,6 +16,10 @@
 #include "spi_slave.h"
 #include "radio_driver.h"
 #include "gps.h"
+#include "uart_callbacks.h"
+#ifdef DEBUG
+#include "debug_uart.h"
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -41,6 +45,12 @@ DMA_HandleTypeDef hdma_spi1_rx;
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart5;
 UART_HandleTypeDef huart6;
+DMA_HandleTypeDef hdma_usart1_tx;
+DMA_HandleTypeDef hdma_usart1_rx;
+DMA_HandleTypeDef hdma_usart5_tx;
+DMA_HandleTypeDef hdma_usart5_rx;
+DMA_HandleTypeDef hdma_usart6_tx;
+DMA_HandleTypeDef hdma_usart6_rx;
 
 /* USER CODE BEGIN PV */
 static radio_message_queue_t radio_rx_queue;
@@ -62,69 +72,6 @@ static void MX_USART6_UART_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-// Debug UART forwarding (UART1 -> Radio for testing)
-static uint8_t debug_rx_buffer[1];
-
-/**
- * @brief DMA RX Event callback for IDLE/HT/TC events
- *
- * This is the main receive handler for DMA + IDLE mode.
- * Routes events to GPS (UART6) and Radio (UART5) drivers.
- */
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
-{
-    if (huart->Instance == USART6)
-    {
-        // GPS DMA event (IDLE, Half-Transfer, or Transfer-Complete)
-        gps_rx_event_callback(huart, Size);
-    }
-    else if (huart->Instance == USART5)
-    {
-        // Radio DMA event
-        radio_rx_event_callback(huart, Size);
-    }
-}
-
-/**
- * @brief Legacy RX complete callback (for per-byte interrupt mode)
- *
- * Only used for UART1 debug console (which still uses per-byte).
- * GPS and Radio now use DMA + IDLE via HAL_UARTEx_RxEventCallback.
- */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == USART1)
-    {
-        // Forward received byte to Radio (UART5) - NON-BLOCKING
-        HAL_UART_Transmit_IT(&huart5, debug_rx_buffer, 1);
-        
-        // Echo back to ST-Link (so you see what you typed)
-        HAL_UART_Transmit(&huart1, debug_rx_buffer, 1, 100);
-        
-        // Re-enable receive interrupt for next byte
-        HAL_UART_Receive_IT(&huart1, debug_rx_buffer, 1);
-    }
-}
-
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-    // Route to GPS driver for debug output TX completion
-    gps_uart_tx_cplt_callback(huart);
-}
-
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == USART6)
-    {
-        // GPS UART error - attempt recovery
-        gps_uart_error_callback(huart);
-    }
-    else if (huart->Instance == USART5)
-    {
-        // Radio UART error - attempt recovery
-        radio_uart_error_callback(huart);
-    }
-}
 
 /* USER CODE END 0 */
 
@@ -176,8 +123,13 @@ int main(void)
   // Initialize SPI slave (uses radio queue and GPS queue)
   spi_slave_init(&radio_rx_queue, &gps_sample_queue);
 
-  // Enable UART RX interrupts for debug console
-  HAL_UART_Receive_IT(&huart1, debug_rx_buffer, 1);
+#ifdef DEBUG
+  // Initialize debug UART system (injection + logging, uses DMA + IDLE)
+  debug_uart_init(&radio_rx_queue, &gps_sample_queue);
+#else
+  // Initialize UART callback system (per-byte interrupt for debug console)
+  uart_callbacks_init(&huart1);
+#endif
 
   HAL_UART_Transmit(&huart1, (uint8_t*)"System ready (push mode)\r\n", 26, 100);
   /* USER CODE END 2 */
@@ -196,6 +148,11 @@ int main(void)
       // Push mode tick - check for pending data and assert IRQ if needed
       spi_slave_tick();
 
+#ifdef DEBUG
+      // Process and transmit pending debug log messages
+      debug_uart_process_logs();
+#endif
+
       // Check if radio message received (for debug output)
       if (radio_available()) {
           uint8_t msg[RADIO_MAX_MESSAGE_LEN];
@@ -210,10 +167,11 @@ int main(void)
       }
       
       HAL_Delay(1);  // Reduced delay for faster push response
-    /* USER CODE END 3 */
+  /* USER CODE END 3 */
   }
-  /* USER CODE END WHILE */
+  /* USER CODE BEGIN WHILE */
 }
+/* USER CODE END WHILE */
 
 /**
   * @brief System Clock Configuration
@@ -422,6 +380,7 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA1_CLK_ENABLE();
+  __HAL_RCC_DMA2_CLK_ENABLE();
 
   /* DMA interrupt init */
   /* DMA1_Channel1_IRQn interrupt configuration */
@@ -430,6 +389,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel2_3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
+  /* DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn);
 
 }
 

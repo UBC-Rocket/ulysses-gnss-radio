@@ -20,6 +20,9 @@
 #include "lwgps/lwgps.h"
 #include <stdbool.h>
 #include <string.h>
+#ifdef DEBUG
+#include "debug_uart.h"
+#endif
 
 /* ============================================================================
  * Configuration
@@ -287,6 +290,10 @@ static void feed_byte(uint8_t b)
             /* PULL MODE: Enqueue raw NMEA sentence */
             if (s_gps_queue != NULL) {
                 gps_sample_enqueue(s_line, s_gps_queue);
+#ifdef DEBUG
+                /* Log NMEA sentence to debug console */
+                debug_uart_log_gps_nmea((const char*)s_line);
+#endif
             }
         } else if (s_protocol_mode == SPI_MODE_PUSH) {
             /* PUSH MODE: Enqueue parsed fix if valid */
@@ -294,6 +301,10 @@ static void feed_byte(uint8_t b)
                 populate_gps_fix(&s_parsed_fix, &s_lwgps);
                 if (s_gps_fix_queue != NULL) {
                     gps_fix_enqueue(&s_parsed_fix, s_gps_fix_queue);
+#ifdef DEBUG
+                    /* Log decoded GPS fix to debug console */
+                    debug_uart_log_gps_fix(&s_parsed_fix);
+#endif
                 }
             }
         }

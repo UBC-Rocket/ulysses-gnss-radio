@@ -15,6 +15,9 @@
 #include "radio_driver.h"
 #include "stm32g0xx_hal.h"
 #include <string.h>
+#ifdef DEBUG
+#include "debug_uart.h"
+#endif
 
 /* ============================================================================
  * Configuration
@@ -250,6 +253,11 @@ static void feed_byte(uint8_t b)
         if (s_msg_len > 0) {
             /* Enqueue the accumulated message */
             radio_message_enqueue(s_msg_len, s_msg_buf, rx_queue);
+
+#ifdef DEBUG
+            /* Log to debug console */
+            debug_uart_log_radio(s_msg_buf, s_msg_len);
+#endif
 
             /* Reset for next message */
             s_msg_len = 0;

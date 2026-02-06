@@ -21,6 +21,9 @@
 #include "spi_slave.h"
 // #include "gps_driver.h"  // TODO: Add when GPS driver is implemented
 #include <string.h>
+#ifdef DEBUG
+#include "debug_uart.h"
+#endif
 
 // ============================================================================
 // STATIC CONTEXT
@@ -551,6 +554,10 @@ void spi_slave_dma1_ch1_irq_handler(void) {
             // (byte 0 is cmd from RXNE ISR, bytes 1-4 are dummy, bytes 5-260 are payload)
             if (ctx.radio_queue) {
                 radio_message_enqueue(256, &ctx.rx_buf[CMD_OVERHEAD], ctx.radio_queue);
+#ifdef DEBUG
+                /* Log SPI radio TX to debug console */
+                debug_uart_log_spi_radio_tx(&ctx.rx_buf[CMD_OVERHEAD], 256);
+#endif
                 ctx.payload_processed = true;
             }
         }
@@ -663,6 +670,10 @@ void spi_slave_nss_exti_handler(void) {
                     // If DMA TC already processed it, this is a no-op
                     if (ctx.radio_queue) {
                         radio_message_enqueue(256, &ctx.rx_buf[CMD_OVERHEAD], ctx.radio_queue);
+#ifdef DEBUG
+                        /* Log SPI radio TX to debug console */
+                        debug_uart_log_spi_radio_tx(&ctx.rx_buf[CMD_OVERHEAD], 256);
+#endif
                         ctx.payload_processed = true;
                     }
                 } else if (payload_bytes > 0) {
