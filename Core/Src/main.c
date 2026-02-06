@@ -60,7 +60,6 @@ static void MX_USART6_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* USER CODE BEGIN 0 */
 uint8_t rx_buffer[1];
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -77,6 +76,52 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         HAL_UART_Receive_IT(&huart1, rx_buffer, 1);
     }
 }
+
+bool radio_send(uint8_t *data, uint8_t len) {
+    if (len == 0 || len > 254) {
+        return false;  // Invalid length
+    }
+    
+    // Send data
+    HAL_StatusTypeDef status = HAL_UART_Transmit(&huart5, data, len, 1000);
+    
+    // Send null terminator
+    uint8_t null_byte = 0x00;
+    HAL_UART_Transmit(&huart5, &null_byte, 1, 100);
+    
+    return (status == HAL_OK);
+}
+
+/**
+ * Initialize radio driver (call once at startup)
+ */
+void radio_init(void) {
+    radio_message_queue_init(&radio_message_queue);
+    static uint8_t rx_byte;
+    HAL_UART_Receive_IT(&huart5, &rx_byte, 1);
+}
+
+/**
+ * Check if message available
+ * Returns: true if message waiting, false if queue empty
+ */
+bool radio_available(void) {
+    return !radio_message_queue_empty(&radio_message_queue);
+}
+
+/**
+ * Read received message
+ * @param buffer: Buffer to store message (must be 255 bytes)
+ * @return: Message length (0 if none available)
+ */
+uint8_t radio_read(uint8_t *buffer) {
+    if (radio_message_queue_empty(&radio_message_queue)) {
+        return 0;
+    }
+    radio_message_dequeue(&radio_message_queue, buffer);
+    return strlen((char*)buffer);
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -114,11 +159,7 @@ int main(void)
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-  radio_message_queue_init(&radio_message_queue);
-    
-  // ✅ LINE 2: Start UART5 RX interrupt (100% REQUIRED)
-  static uint8_t rx_byte;
-  HAL_UART_Receive_IT(&huart5, &rx_byte, 1);
+  radio_init();
 
   HAL_UART_Transmit(&huart1, (uint8_t*)"Radio RX ready\r\n", 16, 100);
   /* USER CODE END 2 */
@@ -127,28 +168,23 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
+      /* USER CODE BEGIN 3 */
 
-    /* USER CODE BEGIN 3 */
-    
-
-    static uint32_t loop_count = 0;
-    if (loop_count++ % 100 == 0) {  // Every 1 second (100 * 10ms)
-        HAL_GPIO_TogglePin(GPIOB, STAT_LEDR_Pin);
-    }
-
-    // Check if radio message received
-    if (!radio_message_queue_empty(&radio_message_queue)) {
-        uint8_t msg[255];
-        radio_message_dequeue(&radio_message_queue, msg);
-        
-        // Output to ST-Link UART (UART1)
-        HAL_UART_Transmit(&huart1, (uint8_t*)"RX: ", 4, 100);
-        HAL_UART_Transmit(&huart1, msg, strlen((char*)msg), 100);
-        HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
-    }
-    
-    HAL_Delay(10);  // 10 ms delay
+      // Check if radio message received
+      if (radio_available()) {
+          uint8_t msg[255];
+          uint8_t len = radio_read(msg);
+          
+          if (len > 0) {
+              // Output to ST-Link UART (UART1)
+              HAL_UART_Transmit(&huart1, (uint8_t*)"RX: ", 4, 100);
+              HAL_UART_Transmit(&huart1, msg, len, 100);
+              HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
+          }
+      }
+      
+      HAL_Delay(10);
+      /* USER CODE END 3 */
   }
   /* USER CODE END 3 */
 }
