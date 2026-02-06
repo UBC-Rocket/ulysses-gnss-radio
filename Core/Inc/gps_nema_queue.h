@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define GPS_SAMPLE_SIZE 87  // Max NMEA sentence length per protocol spec
+#define GPS_SAMPLE_SIZE 87  // Max NMEA sentence length (82 chars + 5 byte margin)
 #define GPS_SAMPLE_QUEUE_LEN 10
 
 typedef struct {

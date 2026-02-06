@@ -45,7 +45,7 @@ typedef enum {
 #define PULL_DUMMY_BYTES         4    // CRITICAL: 4 bytes needed to avoid TX FIFO prefetch race
 #define CMD_OVERHEAD             (PULL_CMD_BYTES + PULL_DUMMY_BYTES)  // 5 bytes
 #define PULL_RADIO_PAYLOAD       256
-#define PULL_GPS_PAYLOAD         87   // Max NMEA sentence length
+#define PULL_GPS_PAYLOAD         87   // Max NMEA sentence length (82 chars + margin)
 #define PULL_BUFLEN_PAYLOAD      1    // Single byte count
 
 #define PULL_RADIO_TOTAL         (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_RADIO_PAYLOAD)  // 261
@@ -55,10 +55,10 @@ typedef enum {
 // Push mode transaction sizes (TYPE + PAYLOAD)
 #define PUSH_TYPE_BYTES          1
 #define PUSH_RADIO_PAYLOAD       256
-#define PUSH_GPS_PAYLOAD         48   // sizeof(gps_fix_t), adjust if needed
+#define PUSH_GPS_PAYLOAD         87   // Raw NMEA sentence (82 chars + margin)
 
 #define PUSH_RADIO_TOTAL         (PUSH_TYPE_BYTES + PUSH_RADIO_PAYLOAD)  // 257
-#define PUSH_GPS_TOTAL           (PUSH_TYPE_BYTES + PUSH_GPS_PAYLOAD)    // 49
+#define PUSH_GPS_TOTAL           (PUSH_TYPE_BYTES + PUSH_GPS_PAYLOAD)    // 88
 
 // Maximum transaction size (for buffer allocation)
 #define MAX_TRANSACTION_SIZE     PULL_RADIO_TOTAL  // 261 bytes
@@ -106,10 +106,7 @@ typedef struct {
     uint32_t time_of_week_ms;  // GPS time of week in milliseconds      [4 bytes]
 
     uint8_t  padding2[8];      // Padding to 48 bytes total             [8 bytes]
-} __attribute__((packed)) gps_fix_t;  // Total: 48 bytes
-
-// Verify struct size matches PUSH_GPS_PAYLOAD
-_Static_assert(sizeof(gps_fix_t) == PUSH_GPS_PAYLOAD, "gps_fix_t size mismatch");
+} __attribute__((packed)) gps_fix_t;  // Total: 48 bytes (reserved for future parsed GPS)
 
 // ----------------------------------------------------------------------------
 // Buffer Limits

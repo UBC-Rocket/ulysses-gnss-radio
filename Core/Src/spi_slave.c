@@ -405,17 +405,14 @@ static void spi_slave_prepare_push(uint8_t push_type) {
         // Load type byte
         ctx.tx_buf[0] = PUSH_TYPE_GPS;
 
-        // TODO: Uncomment when GPS driver is implemented
-        // Load GPS fix data
-        // const gps_fix_t *fix = gps_get_fix_ptr();
-        // if (fix) {
-        //     memcpy(&ctx.tx_buf[PUSH_TYPE_BYTES], fix, sizeof(gps_fix_t));
-        // }
-        // Mark fix as consumed
-        // gps_clear_fix();
+        // Load raw NMEA sentence from GPS queue (peek, don't dequeue yet)
+        uint8_t *gps_ptr;
+        if (gps_sample_queue_tail_pointer(ctx.gps_queue, &gps_ptr)) {
+            memcpy(&ctx.tx_buf[PUSH_TYPE_BYTES], gps_ptr, PUSH_GPS_PAYLOAD);
+        }
 
-        // Set TX length: type byte + GPS payload
-        ctx.tx_dma_length = PUSH_GPS_TOTAL;  // 1 + 48 = 49
+        // Set TX length: type byte + NMEA payload
+        ctx.tx_dma_length = PUSH_GPS_TOTAL;  // 1 + 87 = 88
         break;
     }
 
@@ -616,8 +613,9 @@ void spi_slave_nss_exti_handler(void) {
                     // Pop the message from queue since it was transmitted
                     if (ctx.pending_push_type == PUSH_TYPE_RADIO && ctx.radio_queue) {
                         radio_message_queue_pop(ctx.radio_queue);
+                    } else if (ctx.pending_push_type == PUSH_TYPE_GPS && ctx.gps_queue) {
+                        gps_sample_queue_pop(ctx.gps_queue);
                     }
-                    // GPS fix doesn't need to be popped - it's a single value
 
                     ctx.push_transactions++;
                 }
@@ -815,6 +813,8 @@ bool spi_slave_rx_has_valid_data(void) {
  *
  * Call this from the main loop. When data is available and the slave
  * is idle, this prepares the TX buffer, arms DMAs, and asserts IRQ.
+ *
+ * Priority: GPS (smaller, more time-critical) > Radio (larger)
  */
 void spi_slave_tick(void) {
     // Only process if we're idle (not mid-transaction)
@@ -827,16 +827,15 @@ void spi_slave_tick(void) {
         return;
     }
 
+    // Check for pending GPS NMEA sentence to push (higher priority - smaller, time-sensitive)
+    if (ctx.gps_queue && !gps_sample_queue_empty(ctx.gps_queue)) {
+        spi_slave_prepare_push(PUSH_TYPE_GPS);
+        return;
+    }
+
     // Check for pending radio message to push
     if (ctx.radio_queue && !radio_message_queue_empty(ctx.radio_queue)) {
         spi_slave_prepare_push(PUSH_TYPE_RADIO);
         return;
     }
-
-    // TODO: Uncomment when GPS driver is implemented
-    // Check for pending GPS fix to push
-    // if (gps_fix_available()) {
-    //     spi_slave_prepare_push(PUSH_TYPE_GPS);
-    //     return;
-    // }
 }
