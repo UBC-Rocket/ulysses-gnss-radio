@@ -42,14 +42,15 @@ typedef enum {
 
 // Pull mode transaction sizes (CMD + DUMMY + DATA)
 #define PULL_CMD_BYTES           1
-#define PULL_DUMMY_BYTES         2
+#define PULL_DUMMY_BYTES         4    // CRITICAL: 4 bytes needed to avoid TX FIFO prefetch race
+#define CMD_OVERHEAD             (PULL_CMD_BYTES + PULL_DUMMY_BYTES)  // 5 bytes
 #define PULL_RADIO_PAYLOAD       256
 #define PULL_GPS_PAYLOAD         87   // Max NMEA sentence length
 #define PULL_BUFLEN_PAYLOAD      1    // Single byte count
 
-#define PULL_RADIO_TOTAL         (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_RADIO_PAYLOAD)  // 259
-#define PULL_GPS_TOTAL           (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_GPS_PAYLOAD)    // 90
-#define PULL_BUFLEN_TOTAL        (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_BUFLEN_PAYLOAD) // 4
+#define PULL_RADIO_TOTAL         (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_RADIO_PAYLOAD)  // 261
+#define PULL_GPS_TOTAL           (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_GPS_PAYLOAD)    // 92
+#define PULL_BUFLEN_TOTAL        (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_BUFLEN_PAYLOAD) // 6
 
 // Push mode transaction sizes (TYPE + PAYLOAD)
 #define PUSH_TYPE_BYTES          1
@@ -60,7 +61,7 @@ typedef enum {
 #define PUSH_GPS_TOTAL           (PUSH_TYPE_BYTES + PUSH_GPS_PAYLOAD)    // 49
 
 // Maximum transaction size (for buffer allocation)
-#define MAX_TRANSACTION_SIZE     PULL_RADIO_TOTAL  // 259 bytes
+#define MAX_TRANSACTION_SIZE     PULL_RADIO_TOTAL  // 261 bytes
 
 // ----------------------------------------------------------------------------
 // Collision Detection Timing
@@ -87,24 +88,25 @@ typedef struct {
 // ----------------------------------------------------------------------------
 typedef struct {
     // Position
-    double   latitude;         // Degrees, signed (-90 to +90)
-    double   longitude;        // Degrees, signed (-180 to +180)
-    float    altitude_msl;     // Meters above sea level
+    double   latitude;         // Degrees, signed (-90 to +90)          [8 bytes]
+    double   longitude;        // Degrees, signed (-180 to +180)        [8 bytes]
+    float    altitude_msl;     // Meters above sea level                [4 bytes]
 
     // Velocity & Heading
-    float    ground_speed;     // m/s
-    float    course;           // Degrees true north (0-360)
+    float    ground_speed;     // m/s                                   [4 bytes]
+    float    course;           // Degrees true north (0-360)            [4 bytes]
 
     // Quality indicators
-    uint8_t  fix_quality;      // 0=invalid, 1=GPS, 2=DGPS, etc.
-    uint8_t  num_satellites;   // Number of satellites used
-    float    hdop;             // Horizontal dilution of precision
+    uint8_t  fix_quality;      // 0=invalid, 1=GPS, 2=DGPS, etc.        [1 byte]
+    uint8_t  num_satellites;   // Number of satellites used             [1 byte]
+    uint8_t  padding1[2];      // Alignment padding                     [2 bytes]
+    float    hdop;             // Horizontal dilution of precision      [4 bytes]
 
     // Timestamp
-    uint32_t time_of_week_ms;  // GPS time of week in milliseconds
+    uint32_t time_of_week_ms;  // GPS time of week in milliseconds      [4 bytes]
 
-    uint8_t  padding[3];       // Padding to 48 bytes total
-} __attribute__((packed)) gps_fix_t;
+    uint8_t  padding2[8];      // Padding to 48 bytes total             [8 bytes]
+} __attribute__((packed)) gps_fix_t;  // Total: 48 bytes
 
 // Verify struct size matches PUSH_GPS_PAYLOAD
 _Static_assert(sizeof(gps_fix_t) == PUSH_GPS_PAYLOAD, "gps_fix_t size mismatch");

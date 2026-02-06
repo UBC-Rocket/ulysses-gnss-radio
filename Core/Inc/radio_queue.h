@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define RADIO_MESSAGE_MAX_LEN 255
+#define RADIO_MESSAGE_MAX_LEN 256
 #define RADIO_MESSAGE_QUEUE_LEN 10
 
 typedef struct {
@@ -28,7 +28,7 @@ static inline bool radio_message_queue_full(radio_message_queue_t *q) {
     return ((q->head + 1) % RADIO_MESSAGE_QUEUE_LEN) == q->tail;
 }
 
-static inline bool radio_message_enqueue(uint8_t len, uint8_t *data, radio_message_queue_t *q) {
+static inline bool radio_message_enqueue(uint16_t len, uint8_t *data, radio_message_queue_t *q) {
     if (radio_message_queue_full(q)) return false;
 
     if (len > RADIO_MESSAGE_MAX_LEN) return false;

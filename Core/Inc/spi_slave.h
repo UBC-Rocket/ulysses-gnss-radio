@@ -1,198 +1,180 @@
-#ifndef SPI_SLAVE_H
-#define SPI_SLAVE_H
+#ifndef SPI_SLAVE_LL_H
+#define SPI_SLAVE_LL_H
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "main.h"
-#include "radio_queue.h"
-#include "gps_queue.h"
+#include "stm32g0xx.h"
 #include "protocol_config.h"
+#include "radio_queue.h"
+#include "gps_nema_queue.h"
 
 // ============================================================================
-// SPI SLAVE PROTOCOL HANDLER
-// Pull & Push Mode Support with Collision Detection
+// HARDWARE DEFINITIONS
 // ============================================================================
 
-// ----------------------------------------------------------------------------
-// State Machine States
-// ----------------------------------------------------------------------------
+// SPI Peripheral Selection
+#define SPI_PERIPHERAL          SPI2
+
+// DMA Configuration
+#define DMA_CONTROLLER          DMA1
+#define RX_DMA_CHANNEL          DMA1_Channel1
+#define TX_DMA_CHANNEL          DMA1_Channel2
+#define RX_DMAMUX_CHANNEL       DMAMUX1_Channel0
+#define TX_DMAMUX_CHANNEL       DMAMUX1_Channel1
+
+// DMAMUX Request IDs (RM0444 Table 59)
+#define DMAREQ_SPI2_RX          18
+#define DMAREQ_SPI2_TX          19
+
+// ============================================================================
+// GPIO PIN DEFINITIONS
+// ============================================================================
+
+#define SPI_NSS_PIN             GPIO_PIN_12  // PB12
+#define SPI_SCK_PIN             GPIO_PIN_13  // PB13
+#define SPI_MISO_PIN            GPIO_PIN_14  // PB14
+#define SPI_MOSI_PIN            GPIO_PIN_15  // PB15
+#define SPI_GPIO_PORT           GPIOB
+
+// For STM32G0B1, SPI2 is typically AF0 on PB12-15, but VERIFY THIS!
+#define SPI_AF_NUM              0
+
+// NSS EXTI Configuration
+#define NSS_EXTI_LINE           12
+#define NSS_EXTI_PORT           0x01  // Port B = 0x01 (for EXTICR register)
+
+// IRQ Line for Push Mode (PB2)
+#define IRQ_GPIO_PORT           GPIOB
+#define IRQ_GPIO_PIN            GPIO_PIN_2
+
+// ============================================================================
+// STATE MACHINE
+// ============================================================================
+
 typedef enum {
-    SPI_STATE_WAIT_CONFIG,    // Initial state, waiting for configuration frame
-    SPI_STATE_IDLE,           // Armed for RX, waiting for master or tick
-    SPI_STATE_PULL_CMD,       // Receiving/processing pull mode command
-    SPI_STATE_PULL_RESPONSE,  // Sending pull mode response data
-    SPI_STATE_HAVE_DATA,      // Push mode: data ready, IRQ asserted
-    SPI_STATE_PUSH_TYPE,      // Push mode: sending type byte
-    SPI_STATE_PUSH_PAYLOAD,   // Push mode: sending payload data
-    SPI_STATE_RX_RADIO,       // Receiving radio TX from master
-    SPI_STATE_COLLISION,      // Detected race condition, backing off
-    SPI_STATE_COMPLETE,       // Transaction complete, cleanup
-} spi_handler_state_t;
+    SPI_STATE_IDLE,          // Waiting for command byte (RXNEIE enabled)
+    SPI_STATE_ACTIVE,        // Mid-transaction (DMA handling remaining bytes)
 
-// ----------------------------------------------------------------------------
-// Board State (Error Reporting)
-// ----------------------------------------------------------------------------
-typedef enum {
-    BOARD_STATE_OK = 0,
-    BOARD_STATE_ERROR_DMA,
-    BOARD_STATE_ERROR_OVERFLOW,
-    BOARD_STATE_ERROR_TIMEOUT,
-} board_state_t;
+    // Push mode states (not used yet, prepared for future)
+    // SPI_STATE_HAVE_DATA,     // Push mode: data ready, IRQ asserted
+    // SPI_STATE_PUSH_TYPE,     // Push mode: sending type byte
+    // SPI_STATE_PUSH_PAYLOAD,  // Push mode: sending payload
+    // SPI_STATE_COLLISION,     // Push mode: collision detected
+} spi_slave_state_t;
 
-// ----------------------------------------------------------------------------
-// Transaction Context
-// ----------------------------------------------------------------------------
+// ============================================================================
+// CONTEXT STRUCTURE
+// ============================================================================
+
 typedef struct {
-    // Current command/type being processed
-    uint8_t command;              // Pull mode command byte
-    uint8_t push_type;            // Push mode data type
+    // ── State ──
+    volatile spi_slave_state_t state;
+    volatile uint8_t current_cmd;
+    volatile bool payload_processed;  // Prevents double-processing in DMA TC + EXTI
 
-    // Buffer pointers for current transaction
-    uint8_t *tx_buffer;
-    uint8_t *rx_buffer;
-    uint16_t transfer_size;
+    // ── Buffers ──
+    // NOTE: Aligned to 32-byte boundary for optimal DMA performance
+    uint8_t tx_buf[MAX_TRANSACTION_SIZE] __attribute__((aligned(32)));
+    uint8_t rx_buf[MAX_TRANSACTION_SIZE] __attribute__((aligned(32)));
 
-    // Transaction state tracking
-    bool dummy_phase_complete;    // Pull mode: finished cmd + dummy bytes
-    uint8_t phase;                // Multi-phase transaction tracking
-} spi_transaction_ctx_t;
-
-// ----------------------------------------------------------------------------
-// Main SPI Handler Structure
-// ----------------------------------------------------------------------------
-typedef struct {
-    // Queues
+    // ── Queue Pointers ──
     radio_message_queue_t *radio_queue;
     gps_sample_queue_t *gps_queue;
 
-    // State
-    spi_handler_state_t state;
-    spi_protocol_mode_t mode;       // Pull or Push mode
-    config_frame_t config;          // Startup configuration
-    board_state_t board_state;      // Error state
+    // ── Statistics & Diagnostics ──
+    volatile uint32_t transactions_completed;
+    volatile uint32_t overrun_errors;
+    volatile uint32_t transfer_errors;
+    volatile uint32_t unknown_commands;
 
-    // Transaction context
-    spi_transaction_ctx_t transaction;
-
-    // Collision detection
+    // ── Push Mode Infrastructure (prepared, not used yet) ──
     volatile bool irq_asserted;
-    volatile uint32_t irq_assert_timestamp;  // In microseconds
-
-    // Ping-pong RX buffers
-    uint8_t *rx_active_buffer;
-    uint8_t *rx_complete_buffer;
-
-    // Callback for forwarding radio messages to UART
-    void (*radio_tx_callback)(uint8_t *data, uint16_t len);
-
-    // Statistics (optional, for debugging)
-    uint32_t transactions_completed;
+    uint32_t irq_assert_timestamp;
     uint32_t collisions_detected;
-    uint32_t errors;
-} spi_handler_t;
 
-// ----------------------------------------------------------------------------
-// Public API
-// ----------------------------------------------------------------------------
+} spi_slave_context_t;
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
 
 /**
- * @brief Initialize SPI slave protocol handler
+ * @brief Initialize SPI slave peripheral in pull mode
+ *
+ * Configures SPI2 as slave with hardware NSS, sets up DMA channels,
+ * and arms for the first transaction.
  *
  * @param radio_queue Pointer to radio message queue
  * @param gps_queue Pointer to GPS sample queue
- *
- * Sets up DMA, GPIO, and arms RX for configuration frame.
  */
 void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_queue);
 
 /**
- * @brief Tick function called from main loop
- *
- * Checks for pending data and transitions IDLE -> HAVE_DATA in push mode.
- * Non-blocking, call frequently (1 kHz recommended).
+ * @brief Get current state (for debugging)
  */
-void spi_slave_tick(void);
+spi_slave_state_t spi_slave_get_state(void);
 
 /**
- * @brief Set callback for forwarding received radio messages to UART
- *
- * @param callback Function pointer to radio TX callback
+ * @brief Get statistics structure (for debugging)
  */
-void spi_slave_set_radio_callback(void (*callback)(uint8_t *data, uint16_t len));
+const spi_slave_context_t* spi_slave_get_context(void);
 
 /**
- * @brief Set board error state
- *
- * @param state Error state to set
+ * @brief Reset error counters
  */
-void spi_slave_set_board_state(board_state_t state);
+void spi_slave_reset_errors(void);
+
+// ============================================================================
+// INTERRUPT HANDLERS (must be called from stm32g0xx_it.c)
+// ============================================================================
+//
+// These functions contain the actual interrupt logic. They are called by the
+// corresponding IRQHandler functions in stm32g0xx_it.c.
+//
+// NOTE: The functions are named with _handler suffix to avoid duplicate symbol
+// errors with the standard IRQHandler names which are defined in stm32g0xx_it.c
 
 /**
- * @brief Get current protocol state (for debugging)
- *
- * @return spi_handler_state_t Current state
+ * @brief SPI2 RXNE interrupt logic
+ * Called when command byte arrives. This is the critical handoff point.
+ * Must be called from SPI2_IRQHandler() in stm32g0xx_it.c
  */
-spi_handler_state_t spi_slave_get_state(void);
+void spi_slave_spi2_irq_handler(void);
 
 /**
- * @brief Get current protocol mode (for debugging)
- *
- * @return spi_protocol_mode_t Current mode (Pull/Push)
+ * @brief DMA1 Channel 1 (RX) interrupt logic
+ * Called when RX DMA transfer completes or errors
+ * Must be called from DMA1_Channel1_IRQHandler() in stm32g0xx_it.c
  */
-spi_protocol_mode_t spi_slave_get_mode(void);
-
-// ----------------------------------------------------------------------------
-// Interrupt Callbacks (called from stm32g0xx_it.c)
-// ----------------------------------------------------------------------------
+void spi_slave_dma1_ch1_irq_handler(void);
 
 /**
- * @brief SPI TX/RX complete callback (DMA complete)
- *
- * Called when a full-duplex DMA transfer completes.
- * Processes received data, transitions state, arms next transfer.
+ * @brief NSS EXTI interrupt logic (line 12)
+ * Called when NSS rising edge detected (transaction end)
+ * Must be called from EXTI4_15_IRQHandler() in stm32g0xx_it.c
  */
-void spi_slave_txrx_complete(void);
+void spi_slave_nss_exti_handler(void);
+
+// ============================================================================
+// PUSH MODE API (stubs for future implementation)
+// ============================================================================
 
 /**
- * @brief CS (NSS) falling edge EXTI callback
- *
- * Called when CS line goes low (master starting transaction).
- * Handles collision detection (checks if within t_race of IRQ assertion).
- */
-void spi_slave_cs_falling_edge(void);
-
-/**
- * @brief CS (NSS) rising edge EXTI callback
- *
- * Called when CS line goes high (master ending transaction).
- * Signals end of transaction, triggers cleanup.
- */
-void spi_slave_cs_rising_edge(void);
-
-// ----------------------------------------------------------------------------
-// Internal Helpers (declared for testing, not part of public API)
-// ----------------------------------------------------------------------------
-
-/**
- * @brief Assert DATA_READY IRQ line (active low)
+ * @brief Assert IRQ line to master (push mode)
+ * TODO: Implement when push mode is enabled
  */
 void spi_slave_assert_irq(void);
 
 /**
- * @brief Deassert DATA_READY IRQ line
+ * @brief Deassert IRQ line to master (push mode)
+ * TODO: Implement when push mode is enabled
  */
 void spi_slave_deassert_irq(void);
 
 /**
- * @brief Transition to new state
- *
- * @param new_state State to transition to
+ * @brief Check for pending push data and assert IRQ if needed (push mode)
+ * TODO: Implement when push mode is enabled
  */
-void spi_slave_transition(spi_handler_state_t new_state);
+void spi_slave_tick(void);
 
-/**
- * @brief Arm DMA for next transaction based on current state and mode
- */
-void spi_slave_arm_dma(void);
-
-#endif // SPI_SLAVE_H
+#endif // SPI_SLAVE_LL_H

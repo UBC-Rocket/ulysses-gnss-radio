@@ -1,682 +1,611 @@
+/**
+ * @file spi_slave_ll.c
+ * @brief Low-level register-based SPI slave implementation for STM32G0B1
+ *
+ * Implements hybrid RXNE interrupt + DMA approach:
+ * - First byte (command) captured by RXNE interrupt
+ * - Remaining bytes handled by DMA (zero CPU overhead)
+ * - Hardware NSS for automatic transaction framing
+ * - EXTI on NSS rising edge for transaction completion
+ *
+ * Protocol: Pull mode only (master-initiated transactions)
+ * Wire format: [CMD:1][DUMMY:4][PAYLOAD:0-256] = max 261 bytes
+ */
+
 #include "spi_slave.h"
-#include "timing_utils.h"
-#include "stm32g0xx_hal.h"
 #include <string.h>
 
 // ============================================================================
-// EXTERNAL HANDLES & DEPENDENCIES
+// STATIC CONTEXT
 // ============================================================================
 
-extern SPI_HandleTypeDef hspi1;  // Defined in main.c
+static spi_slave_context_t ctx;
 
 // ============================================================================
-// BUFFER ALLOCATIONS (DMA-safe, aligned)
+// FORWARD DECLARATIONS
 // ============================================================================
 
-// Ping-pong RX buffers for full-duplex operation
-static uint8_t __attribute__((aligned(32))) rx_buffer_a[MAX_TRANSACTION_SIZE];
-static uint8_t __attribute__((aligned(32))) rx_buffer_b[MAX_TRANSACTION_SIZE];
-
-// TX buffer (pre-loaded with response data)
-static uint8_t __attribute__((aligned(32))) tx_buffer[MAX_TRANSACTION_SIZE];
-
-// Scratch buffer for TX when we don't care about TX content (RX-only transactions)
-static uint8_t __attribute__((aligned(32))) tx_scratch[MAX_TRANSACTION_SIZE];
-
-// ============================================================================
-// STATIC HANDLER INSTANCE
-// ============================================================================
-
-static spi_handler_t handler;
+static void spi_gpio_init(void);
+static void spi_peripheral_init(void);
+static void dmamux_init(void);
+static void exti_nss_init(void);
+static void spi_rx_dma_start(uint8_t *buf, uint16_t len);
+static void spi_tx_dma_start(uint8_t *buf, uint16_t len);
+static void spi_slave_arm(void);
+static void spi_clear_errors(void);
+static uint8_t radio_queue_count(radio_message_queue_t *q);
 
 // ============================================================================
-// GPIO DEFINITIONS
-// ============================================================================
-
-// DATA_READY IRQ line (PB2, active low per spec)
-#define IRQ_GPIO_PORT   GPIOB
-#define IRQ_GPIO_PIN    GPIO_PIN_2
-
-// CS line (PA4, for EXTI monitoring)
-#define CS_GPIO_PORT    GPIOA
-#define CS_GPIO_PIN     GPIO_PIN_4
-
-// ============================================================================
-// HELPER FUNCTIONS
+// INITIALIZATION FUNCTIONS
 // ============================================================================
 
 /**
- * @brief Assert DATA_READY IRQ line (active low)
+ * @brief Configure GPIO pins for SPI2 alternate function
  */
-void spi_slave_assert_irq(void) {
-    handler.irq_assert_timestamp = get_time_us();
-    HAL_GPIO_WritePin(IRQ_GPIO_PORT, IRQ_GPIO_PIN, GPIO_PIN_RESET);  // Active LOW
-    handler.irq_asserted = true;
+static void spi_gpio_init(void) {
+    // Enable GPIOB clock
+    RCC->IOPENR |= RCC_IOPENR_GPIOBEN;
+
+    // Configure PB12(NSS), PB13(SCK), PB14(MISO), PB15(MOSI) as alternate function mode
+    // MODER: 00=input, 01=output, 10=AF, 11=analog
+    GPIOB->MODER = (GPIOB->MODER
+                    & ~((3 << (12*2)) | (3 << (13*2)) | (3 << (14*2)) | (3 << (15*2))))
+                    | (2 << (12*2))   // PB12 NSS  → AF
+                    | (2 << (13*2))   // PB13 SCK  → AF
+                    | (2 << (14*2))   // PB14 MISO → AF
+                    | (2 << (15*2));  // PB15 MOSI → AF
+
+    // Pull-up on NSS (keeps line high when master not connected)
+    // PUPDR: 00=no pull, 01=pull-up, 10=pull-down
+    GPIOB->PUPDR = (GPIOB->PUPDR & ~(3 << (12*2))) | (1 << (12*2));
+
+    // High speed on MISO and SCK (reduces edge ringing at high frequencies)
+    // OSPEEDR: 00=low, 01=medium, 10=high, 11=very high
+    GPIOB->OSPEEDR |= (3 << (14*2))  // MISO very high speed
+                    | (3 << (13*2)); // SCK very high speed
+
+    // Set alternate function numbers (AFRH for pins 8-15)
+    GPIOB->AFR[1] = (GPIOB->AFR[1]
+                    & ~((0xF << ((12-8)*4)) | (0xF << ((13-8)*4))
+                       | (0xF << ((14-8)*4)) | (0xF << ((15-8)*4))))
+                    | (SPI_AF_NUM << ((12-8)*4))    // NSS
+                    | (SPI_AF_NUM << ((13-8)*4))    // SCK
+                    | (SPI_AF_NUM << ((14-8)*4))    // MISO
+                    | (SPI_AF_NUM << ((15-8)*4));   // MOSI
+
+    // Configure IRQ pin (PB2) for push mode - output, initially high (inactive)
+    GPIOB->MODER = (GPIOB->MODER & ~(3 << (2*2))) | (1 << (2*2));  // Output mode
+    GPIOB->BSRR = IRQ_GPIO_PIN;  // Set high (inactive)
 }
 
 /**
- * @brief Deassert DATA_READY IRQ line
+ * @brief Configure SPI2 peripheral registers
  */
-void spi_slave_deassert_irq(void) {
-    HAL_GPIO_WritePin(IRQ_GPIO_PORT, IRQ_GPIO_PIN, GPIO_PIN_SET);  // Inactive HIGH
-    handler.irq_asserted = false;
+static void spi_peripheral_init(void) {
+    // Enable SPI2 clock
+    RCC->APBENR1 |= RCC_APBENR1_SPI2EN;
+
+    // Disable SPI during configuration
+    SPI2->CR1 &= ~SPI_CR1_SPE;
+
+    // ── CR1 Configuration ──
+    // All zeros = slave mode, CPOL=0, CPHA=0 (SPI Mode 0), MSB first, hardware NSS
+    SPI2->CR1 = 0;
+    // CPHA=0: data sampled on first (leading) clock edge
+    // CPOL=0: clock idles low
+    // MSTR=0: slave mode
+    // SSM=0: hardware NSS management
+    // LSBFIRST=0: MSB transmitted first
+
+    // ── CR2 Configuration ──
+    // This is the critical register for STM32G0 SPI operation
+    SPI2->CR2 = (7 << SPI_CR2_DS_Pos)    // DS=0b0111 → 8-bit data frames
+              | SPI_CR2_FRXTH             // CRITICAL: FIFO RX threshold = 1 byte (not 2!)
+              | SPI_CR2_RXNEIE            // RXNE interrupt enabled (for command byte)
+              | SPI_CR2_TXDMAEN;          // TX DMA enabled from start
+    // Note: RXDMAEN is deliberately OFF - will be enabled after RXNE ISR reads command
+
+    // Enable SPI peripheral
+    SPI2->CR1 |= SPI_CR1_SPE;
 }
 
 /**
- * @brief Swap ping-pong RX buffers
+ * @brief Configure DMAMUX to route SPI requests to DMA channels
  */
-static void swap_rx_buffers(void) {
-    uint8_t *temp = handler.rx_active_buffer;
-    handler.rx_active_buffer = handler.rx_complete_buffer;
-    handler.rx_complete_buffer = temp;
+static void dmamux_init(void) {
+    // CRITICAL: DMAMUX channels are 0-indexed, DMA channels are 1-indexed!
+    // DMA1_Channel1 → DMAMUX1_Channel0
+    // DMA1_Channel2 → DMAMUX1_Channel1
+
+    // Route SPI2_RX to DMA1 Channel 1 (DMAMUX Channel 0)
+    DMAMUX1_Channel0->CCR = DMAREQ_SPI2_RX;  // 18
+
+    // Route SPI2_TX to DMA1 Channel 2 (DMAMUX Channel 1)
+    DMAMUX1_Channel1->CCR = DMAREQ_SPI2_TX;  // 19
 }
 
 /**
- * @brief Check if there's pending data to send (push mode)
+ * @brief Configure EXTI for NSS rising edge detection
+ */
+static void exti_nss_init(void) {
+    // Route PB12 to EXTI line 12
+    // EXTICR[3] handles lines 12-15
+    // Each line gets 8 bits: 0x00=PortA, 0x01=PortB, 0x02=PortC, etc.
+    EXTI->EXTICR[3] = (EXTI->EXTICR[3] & ~(0xFF << 0)) | (NSS_EXTI_PORT << 0);
+
+    // Enable rising edge detection (NSS deassert = transaction end)
+    EXTI->RTSR1 |= (1 << NSS_EXTI_LINE);
+
+    // Unmask interrupt for line 12
+    EXTI->IMR1 |= (1 << NSS_EXTI_LINE);
+
+    // Enable EXTI4_15 interrupt in NVIC (covers lines 4-15)
+    NVIC_SetPriority(EXTI4_15_IRQn, 2);  // Lower priority than SPI/DMA
+    NVIC_EnableIRQ(EXTI4_15_IRQn);
+}
+
+// ============================================================================
+// DMA HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * @brief Start RX DMA: SPI2_DR → buf (peripheral → memory)
  *
- * @return true if GPS or radio data is queued
+ * @param buf Destination buffer
+ * @param len Number of bytes to receive
  */
-static bool has_pending_data(void) {
-    return !gps_sample_queue_empty(handler.gps_queue) ||
-           !radio_message_queue_empty(handler.radio_queue);
+static void spi_rx_dma_start(uint8_t *buf, uint16_t len) {
+    // Disable channel (required before reconfiguration)
+    DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+    while (DMA1_Channel1->CCR & DMA_CCR_EN);  // Wait for disable to take effect
+
+    // Clear all pending interrupt flags for channel 1
+    DMA1->IFCR = DMA_IFCR_CGIF1;
+
+    // Set addresses and count
+    DMA1_Channel1->CPAR  = (uint32_t)&SPI2->DR;   // Source: SPI data register
+    DMA1_Channel1->CMAR  = (uint32_t)buf;         // Destination: our buffer
+    DMA1_Channel1->CNDTR = len;                   // Number of bytes
+
+    // Configure channel
+    // DIR=0: peripheral → memory (read from peripheral)
+    // MINC=1: increment memory address after each transfer
+    // PSIZE=00: 8-bit peripheral access (CRITICAL for 8-bit SPI frames)
+    // MSIZE=00: 8-bit memory access
+    // PL=10: high priority (RX more critical than TX to avoid overrun)
+    // TCIE=1: transfer complete interrupt enabled
+    // TEIE=1: transfer error interrupt enabled
+    DMA1_Channel1->CCR = DMA_CCR_MINC         // Memory increment
+                       | DMA_CCR_TCIE         // Transfer complete interrupt
+                       | DMA_CCR_TEIE         // Transfer error interrupt
+                       | (2 << DMA_CCR_PL_Pos); // High priority
+
+    // Enable the channel (transfer starts on next SPI RXNE → DMA request)
+    DMA1_Channel1->CCR |= DMA_CCR_EN;
 }
 
 /**
- * @brief Get count of buffered radio messages
+ * @brief Start TX DMA: buf → SPI2_DR (memory → peripheral)
  *
- * @return uint8_t Number of messages (0-255)
+ * @param buf Source buffer
+ * @param len Number of bytes to transmit
  */
-static uint8_t get_radio_queue_count(void) {
-    if (radio_message_queue_empty(handler.radio_queue)) {
+static void spi_tx_dma_start(uint8_t *buf, uint16_t len) {
+    // Disable channel
+    DMA1_Channel2->CCR &= ~DMA_CCR_EN;
+    while (DMA1_Channel2->CCR & DMA_CCR_EN);
+
+    // Clear flags
+    DMA1->IFCR = DMA_IFCR_CGIF2;
+
+    // Set addresses and count
+    DMA1_Channel2->CPAR  = (uint32_t)&SPI2->DR;   // Destination: SPI data register
+    DMA1_Channel2->CMAR  = (uint32_t)buf;         // Source: our buffer
+    DMA1_Channel2->CNDTR = len;                   // Number of bytes
+
+    // Configure channel
+    // DIR=1: memory → peripheral (write to peripheral)
+    // MINC=1: increment memory address
+    // PSIZE=00: 8-bit peripheral access
+    // MSIZE=00: 8-bit memory access
+    // PL=01: medium priority (TX less critical than RX)
+    // No interrupts needed for TX
+    DMA1_Channel2->CCR = DMA_CCR_DIR          // Memory → peripheral
+                       | DMA_CCR_MINC         // Memory increment
+                       | (1 << DMA_CCR_PL_Pos); // Medium priority
+
+    // Enable channel
+    DMA1_Channel2->CCR |= DMA_CCR_EN;
+}
+
+/**
+ * @brief Clear SPI error flags
+ *
+ * Drains RX FIFO and clears OVR/UDR flags
+ */
+static void spi_clear_errors(void) {
+    volatile uint32_t dummy;
+
+    // Drain RX FIFO (up to 4 bytes deep on STM32G0)
+    // FRLVL bits indicate FIFO level: 00=empty, 01=1/4, 10=1/2, 11=full
+    while (SPI2->SR & SPI_SR_FRLVL) {
+        // 8-bit read to pop exactly one byte
+        dummy = *(volatile uint8_t *)&SPI2->DR;
+    }
+
+    // Read SR to clear OVR flag
+    dummy = SPI2->SR;
+    (void)dummy;
+}
+
+/**
+ * @brief Get radio queue message count
+ */
+static uint8_t radio_queue_count(radio_message_queue_t *q) {
+    if (radio_message_queue_empty(q)) {
         return 0;
     }
-
-    // Calculate count from head and tail
-    uint8_t head = handler.radio_queue->head;
-    uint8_t tail = handler.radio_queue->tail;
-
-    if (head >= tail) {
-        return head - tail;
-    } else {
-        return (RADIO_MESSAGE_QUEUE_LEN - tail) + head;
-    }
+    return (q->head - q->tail + RADIO_MESSAGE_QUEUE_LEN) % RADIO_MESSAGE_QUEUE_LEN;
 }
 
 // ============================================================================
-// STATE TRANSITION
+// ARM FUNCTION (Transaction Preparation)
 // ============================================================================
 
 /**
- * @brief Transition to new state with optional debug logging
+ * @brief Arm SPI slave for next transaction
  *
- * @param new_state State to transition to
+ * Stops all DMA, clears errors, zeros TX buffer, and restarts DMA
+ * in the correct initial state (RXNEIE enabled, RXDMAEN disabled).
  */
-void spi_slave_transition(spi_handler_state_t new_state) {
-    // TODO: Add optional debug GPIO toggle or UART logging here
-    handler.state = new_state;
+static void spi_slave_arm(void) {
+    // ── Step 1: Stop everything ──
+    SPI2->CR1 &= ~SPI_CR1_SPE;  // Disable SPI (flushes FIFOs on re-enable)
+    SPI2->CR2 &= ~(SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN | SPI_CR2_RXNEIE);
+
+    // Disable both DMA channels
+    DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+    DMA1_Channel2->CCR &= ~DMA_CCR_EN;
+
+    // Clear all DMA flags
+    DMA1->IFCR = DMA_IFCR_CGIF1 | DMA_IFCR_CGIF2;
+
+    // Clear SPI error flags
+    spi_clear_errors();
+
+    // ── Step 2: Reset state ──
+    ctx.state = SPI_STATE_IDLE;
+    ctx.current_cmd = 0;
+    ctx.payload_processed = false;
+
+    // ── Step 3: Prepare TX buffer ──
+    // Zero the entire buffer. For read commands, response data will be
+    // patched in at offset CMD_OVERHEAD by the RXNE ISR.
+    memset(ctx.tx_buf, 0x00, sizeof(ctx.tx_buf));
+
+    // ── Step 4: Start TX DMA ──
+    // TX DMA runs from the start, streaming from tx_buf for the full
+    // maximum transaction size. During command byte and dummy bytes,
+    // it sends zeros (which master ignores). During response region,
+    // it sends whatever we patched in (or zeros for write commands).
+    spi_tx_dma_start(ctx.tx_buf, MAX_TRANSACTION_SIZE);
+
+    // ── Step 5: Start RX DMA (but gated) ──
+    // RX DMA is configured for all bytes after the command byte.
+    // It points at rx_buf starting at index 1 (byte 0 is the command,
+    // which the RXNE ISR reads manually).
+    // BUT: we don't enable RXDMAEN yet. The DMA channel is armed and waiting,
+    // but the SPI won't send it requests until we flip RXDMAEN on.
+    spi_rx_dma_start(&ctx.rx_buf[1], MAX_TRANSACTION_SIZE - 1);
+
+    // ── Step 6: Configure SPI CR2 ──
+    SPI2->CR2 = (7 << SPI_CR2_DS_Pos)    // 8-bit data frames
+              | SPI_CR2_FRXTH            // 1-byte FIFO threshold
+              | SPI_CR2_RXNEIE           // RXNE interrupt for command byte
+              | SPI_CR2_TXDMAEN;         // TX DMA active from start
+    // Note: RXDMAEN deliberately OFF - enabled after RXNE ISR
+
+    // ── Step 7: Enable SPI ──
+    SPI2->CR1 |= SPI_CR1_SPE;
 }
 
 // ============================================================================
-// DMA ARMING (CRITICAL FUNCTION)
+// INTERRUPT HANDLERS
 // ============================================================================
 
 /**
- * @brief Arm SPI DMA for next transaction
+ * @brief SPI2 RXNE Interrupt Handler
  *
- * REVISED APPROACH: Always arms 256-byte TransmitReceive transactions.
- * TX buffer is pre-loaded based on state:
- * - IDLE: 0xFF (ready to receive)
- * - HAVE_DATA: [TYPE | PAYLOAD] (ready to send)
- * - Other states: appropriate response data
+ * This fires when the first byte (command) arrives and RXNE flag is set.
+ * This is the heart of the hybrid design:
+ * 1. Read command byte manually (8-bit DR read)
+ * 2. Parse command and patch tx_buf if needed (read commands)
+ * 3. Disable RXNEIE
+ * 4. Enable RXDMAEN (hand off to DMA for remaining bytes)
  *
- * Collision detection happens by inspecting RX buffer after DMA complete.
+ * All of this must complete within 4 byte-times (the dummy byte window).
  */
-void spi_slave_arm_dma(void) {
-    HAL_StatusTypeDef status;
-    uint16_t size = MAX_TRANSACTION_SIZE;  // Always 256 bytes
-    uint8_t *tx_buf = tx_scratch;  // Default to scratch (don't care)
-    uint8_t *rx_buf = handler.rx_active_buffer;
+void spi_slave_spi2_irq_handler(void) {
+    // Verify this is an RXNE interrupt
+    if ((SPI2->SR & SPI_SR_RXNE) && (SPI2->CR2 & SPI_CR2_RXNEIE)) {
 
-    // Fill TX buffer based on state
-    memset(tx_scratch, 0xFF, MAX_TRANSACTION_SIZE);
+        // ── Read command byte ──
+        // CRITICAL: 8-bit read to pop exactly one byte from RX FIFO
+        // This also clears the RXNE flag
+        uint8_t cmd = *(volatile uint8_t *)&SPI2->DR;
+        ctx.current_cmd = cmd;
+        ctx.rx_buf[0] = cmd;
 
-    switch (handler.state) {
-        case SPI_STATE_WAIT_CONFIG:
-            // Special case: config frame is only 8 bytes
-            size = CONFIG_FRAME_SIZE;
+        // ── Disable RXNE interrupt ──
+        // We got the command. Don't want RXNE firing for every subsequent byte.
+        SPI2->CR2 &= ~SPI_CR2_RXNEIE;
+
+        // ── Process command and patch TX buffer ──
+        // The master is clocking dummy bytes 1-4 right now.
+        // We have ~4 byte-times to complete this before real data starts.
+
+        switch (cmd) {
+
+        // ────────────────────────────────────
+        // READ COMMANDS: Slave sends data to master
+        // Patch tx_buf with response data starting at CMD_OVERHEAD
+        // ────────────────────────────────────
+
+        case CMD_RADIO_RX_LIFO: {
+            // Get pointer to most recent radio message (don't pop yet)
+            uint8_t *msg_ptr;
+            if (radio_message_queue_head_pointer(ctx.radio_queue, &msg_ptr)) {
+                memcpy(&ctx.tx_buf[CMD_OVERHEAD], msg_ptr, 256);
+            }
+            // If queue empty, tx_buf already zeroed
             break;
+        }
 
-        case SPI_STATE_IDLE:
-            // Always ready to receive 256 bytes
-            // TX = 0xFF (don't care)
+        case CMD_RADIO_RX_FIFO: {
+            // Get pointer to oldest radio message (don't pop yet)
+            uint8_t *msg_ptr;
+            if (radio_message_queue_tail_pointer(ctx.radio_queue, &msg_ptr)) {
+                memcpy(&ctx.tx_buf[CMD_OVERHEAD], msg_ptr, 256);
+            }
             break;
+        }
 
-        case SPI_STATE_HAVE_DATA:
-            // Pre-load TX buffer with type + payload
-            // TX buffer already prepared by prepare_push_tx_buffer()
-            tx_buf = tx_buffer;
+        case CMD_RADIO_RXBUF_LEN: {
+            // Return number of messages in radio queue (0-255)
+            ctx.tx_buf[CMD_OVERHEAD] = radio_queue_count(ctx.radio_queue);
             break;
+        }
 
-        case SPI_STATE_PULL_CMD:
-            // Receiving dummy bytes (2 bytes) while preparing response
-            size = PULL_DUMMY_BYTES;
+        case CMD_GPS_RX: {
+            // Get pointer to oldest GPS sample (don't pop yet)
+            uint8_t *gps_ptr;
+            if (gps_sample_queue_tail_pointer(ctx.gps_queue, &gps_ptr)) {
+                memcpy(&ctx.tx_buf[CMD_OVERHEAD], gps_ptr, GPS_SAMPLE_SIZE);
+            }
             break;
+        }
 
-        case SPI_STATE_PULL_RESPONSE:
-            // Sending response data (already loaded in tx_buffer)
-            tx_buf = tx_buffer;
-            size = handler.transaction.transfer_size;
-            break;
-
-        default:
-            // For other states, just arm with don't-care data
-            break;
-    }
-
-    // Arm the DMA transfer
-    status = HAL_SPI_TransmitReceive_DMA(&hspi1, tx_buf, rx_buf, size);
-
-    if (status != HAL_OK) {
-        // DMA error - set error state
-        handler.board_state = BOARD_STATE_ERROR_DMA;
-        handler.errors++;
-    }
-}
-
-// ============================================================================
-// PULL MODE COMMAND HANDLERS
-// ============================================================================
-
-/**
- * @brief Handle RADIO_RX_LIFO command (0x01)
- *
- * Loads TX buffer with newest radio message + status/dummy prefix
- */
-static void handle_radio_rx_lifo(void) {
-    // TX buffer layout: [STATUS/X] [DUMMY] [DATA 0-255]
-    // For now, status bytes are 0xFF (don't care)
-    memset(tx_buffer, 0xFF, PULL_DUMMY_BYTES);
-
-    uint8_t *data_ptr = tx_buffer + PULL_DUMMY_BYTES;
-
-    uint8_t *msg_ptr;
-    if (radio_message_queue_head_pointer(handler.radio_queue, &msg_ptr)) {
-        memcpy(data_ptr, msg_ptr, RADIO_MESSAGE_MAX_LEN);
-        radio_message_queue_pop_lifo(handler.radio_queue);
-    } else {
-        // Queue empty, send zeros
-        memset(data_ptr, 0, PULL_RADIO_PAYLOAD);
-    }
-
-    handler.transaction.transfer_size = PULL_DUMMY_BYTES + PULL_RADIO_PAYLOAD;
-}
-
-/**
- * @brief Handle RADIO_RX_FIFO command (0x02)
- *
- * Loads TX buffer with oldest radio message + status/dummy prefix
- */
-static void handle_radio_rx_fifo(void) {
-    memset(tx_buffer, 0xFF, PULL_DUMMY_BYTES);
-
-    uint8_t *data_ptr = tx_buffer + PULL_DUMMY_BYTES;
-
-    uint8_t *msg_ptr;
-    if (radio_message_queue_tail_pointer(handler.radio_queue, &msg_ptr)) {
-        memcpy(data_ptr, msg_ptr, RADIO_MESSAGE_MAX_LEN);
-        radio_message_queue_pop(handler.radio_queue);
-    } else {
-        // Queue empty, send zeros
-        memset(data_ptr, 0, PULL_RADIO_PAYLOAD);
-    }
-
-    handler.transaction.transfer_size = PULL_DUMMY_BYTES + PULL_RADIO_PAYLOAD;
-}
-
-/**
- * @brief Handle RADIO_RXBUF_LEN command (0x03)
- *
- * Returns count of buffered radio messages
- */
-static void handle_radio_buf_len(void) {
-    memset(tx_buffer, 0xFF, PULL_DUMMY_BYTES);
-
-    uint8_t count = get_radio_queue_count();
-    tx_buffer[PULL_DUMMY_BYTES] = count;
-
-    handler.transaction.transfer_size = PULL_DUMMY_BYTES + PULL_BUFLEN_PAYLOAD;
-}
-
-/**
- * @brief Handle RADIO_TX command (0x04)
- *
- * Master is sending a radio message - we just receive 256 bytes
- * Response is handled after reception in DMA complete callback
- */
-static void handle_radio_tx(void) {
-    // We're receiving 256 bytes from master
-    // TX buffer doesn't matter (send 0xFF)
-    memset(tx_buffer, 0xFF, PULL_DUMMY_BYTES + PULL_RADIO_PAYLOAD);
-    handler.transaction.transfer_size = PULL_DUMMY_BYTES + PULL_RADIO_PAYLOAD;
-}
-
-/**
- * @brief Handle GPS_RX command (0x05)
- *
- * Returns raw NMEA sentence (pull mode)
- */
-static void handle_gps_rx(void) {
-    memset(tx_buffer, 0xFF, PULL_DUMMY_BYTES);
-
-    uint8_t *data_ptr = tx_buffer + PULL_DUMMY_BYTES;
-
-    uint8_t *gps_ptr;
-    if (gps_sample_queue_tail_pointer(handler.gps_queue, &gps_ptr)) {
-        memcpy(data_ptr, gps_ptr, GPS_SAMPLE_SIZE);
-        gps_sample_queue_pop(handler.gps_queue);
-    } else {
-        // Queue empty, send zeros
-        memset(data_ptr, 0, PULL_GPS_PAYLOAD);
-    }
-
-    handler.transaction.transfer_size = PULL_DUMMY_BYTES + PULL_GPS_PAYLOAD;
-}
-
-/**
- * @brief Process received pull mode command and prepare response
- *
- * @param cmd Command byte received
- */
-static void process_pull_command(uint8_t cmd) {
-    handler.transaction.command = cmd;
-
-    switch (cmd) {
-        case CMD_RADIO_RX_LIFO:
-            handle_radio_rx_lifo();
-            break;
-
-        case CMD_RADIO_RX_FIFO:
-            handle_radio_rx_fifo();
-            break;
-
-        case CMD_RADIO_RXBUF_LEN:
-            handle_radio_buf_len();
-            break;
+        // ────────────────────────────────────
+        // WRITE COMMANDS: Master sends data to slave
+        // No action needed - RX DMA will capture payload
+        // ────────────────────────────────────
 
         case CMD_RADIO_TX:
-            handle_radio_tx();
-            break;
-
-        case CMD_GPS_RX:
-            handle_gps_rx();
+            // Payload will land at rx_buf[CMD_OVERHEAD..CMD_OVERHEAD+255]
+            // via RX DMA. We'll process it in DMA TC ISR or EXTI ISR.
             break;
 
         default:
-            // Unknown command - send zeros
-            memset(tx_buffer, 0, MAX_TRANSACTION_SIZE);
-            handler.transaction.transfer_size = PULL_DUMMY_BYTES + PULL_RADIO_PAYLOAD;
-            handler.errors++;
+            // Unknown command - DMA will still capture bytes,
+            // but we'll ignore them
+            ctx.unknown_commands++;
             break;
-    }
-}
-
-// ============================================================================
-// PUSH MODE HELPERS
-// ============================================================================
-
-/**
- * @brief Prepare push mode TX buffer with type + payload
- *
- * Loads tx_buffer with type byte followed by appropriate payload.
- * GPS has priority over radio.
- *
- * @return true if data was prepared, false if no data available
- */
-static bool prepare_push_tx_buffer(void) {
-    // Priority: GPS first, then radio
-
-    if (!gps_sample_queue_empty(handler.gps_queue)) {
-        // Send GPS data
-        handler.transaction.push_type = PUSH_TYPE_GPS;
-
-        uint8_t *gps_ptr;
-        if (gps_sample_queue_tail_pointer(handler.gps_queue, &gps_ptr)) {
-            // For push mode, we would send parsed GPS struct
-            // For now, send raw NMEA (TODO: implement NMEA parser)
-            memcpy(tx_buffer + PUSH_TYPE_BYTES, gps_ptr, GPS_SAMPLE_SIZE);
-            handler.transaction.transfer_size = GPS_SAMPLE_SIZE;  // Payload size only
-            return true;
         }
+
+        // ── Enable RX DMA ──
+        // This is the critical handoff from interrupt-driven to DMA-driven.
+        // From this point on, all incoming bytes trigger DMA requests instead
+        // of RXNE interrupts. The DMA silently handles all remaining bytes.
+        SPI2->CR2 |= SPI_CR2_RXDMAEN;
+
+        ctx.state = SPI_STATE_ACTIVE;
     }
+}
 
-    if (!radio_message_queue_empty(handler.radio_queue)) {
-        // Send radio data (newest message, LIFO)
-        handler.transaction.push_type = PUSH_TYPE_RADIO;
+/**
+ * @brief DMA1 Channel 1 (RX) Interrupt Handler
+ *
+ * Fires when RX DMA transfer completes or errors.
+ * Transfer complete means all MAX_TRANSACTION_SIZE-1 bytes have been received.
+ * This only happens for full-length transactions (261 bytes total).
+ */
+void spi_slave_dma1_ch1_irq_handler(void) {
 
-        uint8_t *radio_ptr;
-        if (radio_message_queue_head_pointer(handler.radio_queue, &radio_ptr)) {
-            memcpy(tx_buffer + PUSH_TYPE_BYTES, radio_ptr, RADIO_MESSAGE_MAX_LEN);
-            handler.transaction.transfer_size = PUSH_RADIO_PAYLOAD;  // Payload size only
-            return true;
+    // ── Transfer Complete ──
+    if (DMA1->ISR & DMA_ISR_TCIF1) {
+        DMA1->IFCR = DMA_IFCR_CTCIF1;  // Clear flag
+
+        // All 260 bytes received (after command byte).
+        // For write commands, process the payload.
+        if (ctx.current_cmd == CMD_RADIO_TX && !ctx.payload_processed) {
+            // Payload is at rx_buf[CMD_OVERHEAD..CMD_OVERHEAD+255]
+            // (byte 0 is cmd from RXNE ISR, bytes 1-4 are dummy, bytes 5-260 are payload)
+            if (ctx.radio_queue) {
+                radio_message_enqueue(256, &ctx.rx_buf[CMD_OVERHEAD], ctx.radio_queue);
+                ctx.payload_processed = true;
+            }
         }
+
+        // Transaction cleanup will be handled by NSS rising edge EXTI
     }
 
-    return false;  // No data available
-}
+    // ── Transfer Error ──
+    if (DMA1->ISR & DMA_ISR_TEIF1) {
+        DMA1->IFCR = DMA_IFCR_CTEIF1;  // Clear flag
+        ctx.transfer_errors++;
 
-// ============================================================================
-// STARTUP CONFIGURATION
-// ============================================================================
-
-/**
- * @brief Process received configuration frame
- *
- * @param config_data Pointer to 8-byte config frame
- */
-static void process_config_frame(const uint8_t *config_data) {
-    const config_frame_t *cfg = (const config_frame_t *)config_data;
-
-    // Store configuration
-    handler.config = *cfg;
-
-    // Set mode
-    if (cfg->mode == SPI_MODE_PULL || cfg->mode == SPI_MODE_PUSH) {
-        handler.mode = (spi_protocol_mode_t)cfg->mode;
-    } else {
-        // Invalid mode, default to Pull
-        handler.mode = SPI_MODE_PULL;
-        handler.errors++;
+        // DMA bus error - reset everything
+        spi_slave_arm();
     }
-
-    // Transition to IDLE, ready for normal operation
-    spi_slave_transition(SPI_STATE_IDLE);
 }
 
-// ============================================================================
-// MAIN DMA COMPLETE CALLBACK (STATE MACHINE DRIVER)
-// ============================================================================
-
 /**
- * @brief SPI TX/RX DMA complete callback
+ * @brief NSS EXTI Handler (line 12)
  *
- * Called from HAL_SPI_TxRxCpltCallback in stm32g0xx_it.c
- * This is the main state machine driver - runs in ISR context!
+ * Fires when NSS rising edge detected (line 12).
+ * This is the universal "transaction complete" signal.
+ * Handles both full transactions (DMA TC fired) and short transactions
+ * (master ended early).
  */
-void spi_slave_txrx_complete(void) {
-    // Swap buffers immediately (complete buffer now has received data)
-    swap_rx_buffers();
+void spi_slave_nss_exti_handler(void) {
 
-    // Process based on current state
-    switch (handler.state) {
-        case SPI_STATE_WAIT_CONFIG:
-            // Received configuration frame
-            process_config_frame(handler.rx_complete_buffer);
-            // State already transitioned to IDLE in process_config_frame
-            spi_slave_arm_dma();  // Arm for next transaction
-            break;
+    // Check if this is NSS line 12 rising edge
+    if (EXTI->RPR1 & (1 << NSS_EXTI_LINE)) {
+        // Clear pending flag (write 1 to clear)
+        EXTI->RPR1 = (1 << NSS_EXTI_LINE);
+
+        // ── Handle based on state ──
+        switch (ctx.state) {
 
         case SPI_STATE_IDLE:
-            if (handler.mode == SPI_MODE_PULL) {
-                // Received command byte
-                uint8_t cmd = handler.rx_complete_buffer[0];
-                process_pull_command(cmd);
+            // NSS rose before we even got a command byte.
+            // Glitch or aborted transaction. Just re-arm.
+            break;
 
-                // Transition to receiving dummy bytes
-                spi_slave_transition(SPI_STATE_PULL_CMD);
-                spi_slave_arm_dma();
-            } else {
-                // Push mode: received unsolicited radio TX
-                spi_slave_transition(SPI_STATE_RX_RADIO);
+        case SPI_STATE_ACTIVE:
+            // Normal transaction end.
+            // For write commands, check if we got the full payload.
+            if (ctx.current_cmd == CMD_RADIO_TX && !ctx.payload_processed) {
+                // Check how many bytes actually transferred
+                uint16_t remaining = DMA1_Channel1->CNDTR;
+                uint16_t total_rx_bytes = (MAX_TRANSACTION_SIZE - 1) - remaining;
 
-                // Forward to radio UART callback
-                if (handler.radio_tx_callback != NULL) {
-                    handler.radio_tx_callback(handler.rx_complete_buffer, PULL_RADIO_PAYLOAD);
+                // total_rx_bytes includes dummy bytes + payload
+                // Payload bytes = total_rx_bytes - PULL_DUMMY_BYTES
+                uint16_t payload_bytes = 0;
+                if (total_rx_bytes > PULL_DUMMY_BYTES) {
+                    payload_bytes = total_rx_bytes - PULL_DUMMY_BYTES;
                 }
 
-                spi_slave_transition(SPI_STATE_COMPLETE);
-            }
-            break;
-
-        case SPI_STATE_PULL_CMD:
-            // Dummy bytes received, now send response
-            spi_slave_transition(SPI_STATE_PULL_RESPONSE);
-            spi_slave_arm_dma();
-            break;
-
-        case SPI_STATE_PULL_RESPONSE:
-            // Response sent, check if it was RADIO_TX command
-            if (handler.transaction.command == CMD_RADIO_TX) {
-                // Forward received data to radio UART
-                if (handler.radio_tx_callback != NULL) {
-                    handler.radio_tx_callback(
-                        handler.rx_complete_buffer + PULL_DUMMY_BYTES,
-                        PULL_RADIO_PAYLOAD
-                    );
+                if (payload_bytes == 256) {
+                    // Full 256-byte payload received
+                    // If DMA TC already processed it, this is a no-op
+                    if (ctx.radio_queue) {
+                        radio_message_enqueue(256, &ctx.rx_buf[CMD_OVERHEAD], ctx.radio_queue);
+                        ctx.payload_processed = true;
+                    }
+                } else if (payload_bytes > 0) {
+                    // Partial payload - master ended transaction early
+                    // Could enqueue partial message or discard as error
+                    // For now, discard
                 }
             }
 
-            spi_slave_transition(SPI_STATE_COMPLETE);
-            break;
-
-        case SPI_STATE_PUSH_TYPE:
-            // Type byte sent, now send payload
-            spi_slave_transition(SPI_STATE_PUSH_PAYLOAD);
-            spi_slave_arm_dma();
-            break;
-
-        case SPI_STATE_PUSH_PAYLOAD:
-            // Payload sent, pop the message from queue
-            if (handler.transaction.push_type == PUSH_TYPE_GPS) {
-                gps_sample_queue_pop(handler.gps_queue);
-            } else if (handler.transaction.push_type == PUSH_TYPE_RADIO) {
-                radio_message_queue_pop_lifo(handler.radio_queue);
+            // Check for overrun errors
+            if (SPI2->SR & SPI_SR_OVR) {
+                ctx.overrun_errors++;
             }
 
-            spi_slave_transition(SPI_STATE_COMPLETE);
-            break;
-
-        case SPI_STATE_RX_RADIO:
-            // Radio TX received from master, forward to UART
-            if (handler.radio_tx_callback != NULL) {
-                handler.radio_tx_callback(handler.rx_complete_buffer, PULL_RADIO_PAYLOAD);
-            }
-
-            spi_slave_transition(SPI_STATE_COMPLETE);
-            break;
-
-        case SPI_STATE_COLLISION:
-            // Collision resolved, received radio TX
-            if (handler.radio_tx_callback != NULL) {
-                handler.radio_tx_callback(handler.rx_complete_buffer, PULL_RADIO_PAYLOAD);
-            }
-
-            spi_slave_transition(SPI_STATE_COMPLETE);
+            ctx.transactions_completed++;
             break;
 
         default:
-            // Should not get DMA complete in other states
-            handler.errors++;
+            // Unexpected state
             break;
+        }
+
+        // ── Re-arm for next transaction ──
+        spi_slave_arm();
     }
+
+    // Handle other EXTI lines if needed (not used in our design)
 }
 
 // ============================================================================
-// CS EXTI CALLBACKS (COLLISION DETECTION)
+// PUBLIC API IMPLEMENTATION
 // ============================================================================
 
 /**
- * @brief CS (NSS) falling edge callback
- *
- * Called when master asserts CS (starts transaction)
- * Implements collision detection for push mode
- */
-void spi_slave_cs_falling_edge(void) {
-    uint32_t now = get_time_us();
-
-    // Check for collision in push mode
-    if (handler.mode == SPI_MODE_PUSH && handler.irq_asserted) {
-        uint32_t elapsed = now - handler.irq_assert_timestamp;
-
-        if (elapsed < T_RACE_US) {
-            // COLLISION DETECTED
-            handler.collisions_detected++;
-
-            // Deassert IRQ, back off
-            spi_slave_deassert_irq();
-
-            // Transition to collision state, receive 256 bytes
-            spi_slave_transition(SPI_STATE_COLLISION);
-
-            // Arm DMA to receive radio TX (256 bytes)
-            HAL_StatusTypeDef status = HAL_SPI_TransmitReceive_DMA(
-                &hspi1,
-                tx_scratch,
-                handler.rx_active_buffer,
-                PULL_RADIO_PAYLOAD
-            );
-
-            if (status != HAL_OK) {
-                handler.board_state = BOARD_STATE_ERROR_DMA;
-                handler.errors++;
-            }
-        } else {
-            // Normal push mode read (master responding to our IRQ)
-            spi_slave_transition(SPI_STATE_PUSH_TYPE);
-            spi_slave_arm_dma();
-        }
-    } else if (handler.mode == SPI_MODE_PUSH && !handler.irq_asserted) {
-        // Unsolicited CS in push mode = radio TX from master
-        spi_slave_transition(SPI_STATE_RX_RADIO);
-
-        // Arm DMA to receive 256 bytes
-        HAL_StatusTypeDef status = HAL_SPI_TransmitReceive_DMA(
-            &hspi1,
-            tx_scratch,
-            handler.rx_active_buffer,
-            PULL_RADIO_PAYLOAD
-        );
-
-        if (status != HAL_OK) {
-            handler.board_state = BOARD_STATE_ERROR_DMA;
-            handler.errors++;
-        }
-    }
-    // Pull mode: DMA already armed in IDLE state, no action needed here
-}
-
-/**
- * @brief CS (NSS) rising edge callback
- *
- * Called when master deasserts CS (ends transaction)
- */
-void spi_slave_cs_rising_edge(void) {
-    // Transaction complete
-    if (handler.state == SPI_STATE_COMPLETE) {
-        // Cleanup and return to IDLE
-
-        // Deassert IRQ if it was asserted
-        if (handler.irq_asserted) {
-            spi_slave_deassert_irq();
-        }
-
-        // Clear transaction context
-        memset(&handler.transaction, 0, sizeof(handler.transaction));
-
-        // Increment transaction counter
-        handler.transactions_completed++;
-
-        // Return to IDLE
-        spi_slave_transition(SPI_STATE_IDLE);
-        spi_slave_arm_dma();
-    }
-}
-
-// ============================================================================
-// PUBLIC API
-// ============================================================================
-
-/**
- * @brief Initialize SPI slave protocol handler
+ * @brief Initialize SPI slave in pull mode
  */
 void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_queue) {
-    // Clear handler structure
-    memset(&handler, 0, sizeof(handler));
+    // Clear context structure
+    memset(&ctx, 0, sizeof(ctx));
 
     // Store queue pointers
-    handler.radio_queue = radio_queue;
-    handler.gps_queue = gps_queue;
+    ctx.radio_queue = radio_queue;
+    ctx.gps_queue = gps_queue;
 
-    // Initialize buffers
-    handler.rx_active_buffer = rx_buffer_a;
-    handler.rx_complete_buffer = rx_buffer_b;
+    // ── Enable peripheral clocks ──
+    RCC->IOPENR  |= RCC_IOPENR_GPIOBEN;    // GPIO port B
+    RCC->AHBENR  |= RCC_AHBENR_DMA1EN;     // DMA1
+    RCC->APBENR1 |= RCC_APBENR1_SPI2EN;    // SPI2
 
-    // Initialize timing subsystem
-    timing_init();
+    // ── Initialize peripherals ──
+    spi_gpio_init();
+    dmamux_init();
+    spi_peripheral_init();
+    exti_nss_init();
 
-    // Initialize state
-    handler.state = SPI_STATE_WAIT_CONFIG;
-    handler.mode = SPI_MODE_PULL;  // Default, overridden by config frame
-    handler.board_state = BOARD_STATE_OK;
+    // ── Enable interrupts in NVIC ──
+    // SPI2/3 RXNE interrupt (highest priority - must respond fast)
+    // STM32G0B1 has combined SPI2_3_IRQn
+    NVIC_SetPriority(SPI2_3_IRQn, 0);
+    NVIC_EnableIRQ(SPI2_3_IRQn);
 
-    // Initialize IRQ line (deasserted = HIGH)
-    HAL_GPIO_WritePin(IRQ_GPIO_PORT, IRQ_GPIO_PIN, GPIO_PIN_SET);
-    handler.irq_asserted = false;
+    // DMA1 Channel 1 interrupt (high priority)
+    NVIC_SetPriority(DMA1_Channel1_IRQn, 1);
+    NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 
-    // Arm DMA for configuration frame
-    spi_slave_arm_dma();
-}
+    // EXTI already enabled in exti_nss_init()
 
-/**
- * @brief Tick function - called from main loop
- *
- * Checks for pending data in push mode and asserts IRQ
- */
-void spi_slave_tick(void) {
-    // Only relevant in push mode
-    if (handler.mode != SPI_MODE_PUSH) {
-        return;
-    }
-
-    // Only transition if in IDLE state
-    if (handler.state != SPI_STATE_IDLE) {
-        return;
-    }
-
-    // Check if we have data to send
-    if (has_pending_data() && !handler.irq_asserted) {
-        // Prepare TX buffer
-        if (prepare_push_tx_buffer()) {
-            // Transition to HAVE_DATA and assert IRQ
-            spi_slave_transition(SPI_STATE_HAVE_DATA);
-            spi_slave_assert_irq();
-        }
-    }
-}
-
-/**
- * @brief Set radio TX callback
- */
-void spi_slave_set_radio_callback(void (*callback)(uint8_t *data, uint16_t len)) {
-    handler.radio_tx_callback = callback;
-}
-
-/**
- * @brief Set board error state
- */
-void spi_slave_set_board_state(board_state_t state) {
-    handler.board_state = state;
+    // ── Arm for first transaction ──
+    spi_slave_arm();
 }
 
 /**
  * @brief Get current state (for debugging)
  */
-spi_handler_state_t spi_slave_get_state(void) {
-    return handler.state;
+spi_slave_state_t spi_slave_get_state(void) {
+    return ctx.state;
 }
 
 /**
- * @brief Get current mode (for debugging)
+ * @brief Get context pointer (for debugging)
  */
-spi_protocol_mode_t spi_slave_get_mode(void) {
-    return handler.mode;
+const spi_slave_context_t* spi_slave_get_context(void) {
+    return &ctx;
+}
+
+/**
+ * @brief Reset error counters
+ */
+void spi_slave_reset_errors(void) {
+    ctx.overrun_errors = 0;
+    ctx.transfer_errors = 0;
+    ctx.unknown_commands = 0;
+    ctx.collisions_detected = 0;
+}
+
+// ============================================================================
+// PUSH MODE STUBS (for future implementation)
+// ============================================================================
+
+void spi_slave_assert_irq(void) {
+    // TODO: Implement when push mode is enabled
+    // HAL_GPIO_WritePin(IRQ_GPIO_PORT, IRQ_GPIO_PIN, GPIO_PIN_RESET);
+    // ctx.irq_asserted = true;
+    // ctx.irq_assert_timestamp = get_time_us();
+}
+
+void spi_slave_deassert_irq(void) {
+    // TODO: Implement when push mode is enabled
+    // HAL_GPIO_WritePin(IRQ_GPIO_PORT, IRQ_GPIO_PIN, GPIO_PIN_SET);
+    // ctx.irq_asserted = false;
+}
+
+void spi_slave_tick(void) {
+    // TODO: Implement when push mode is enabled
+    // Check for pending data in queues
+    // If data available and state == IDLE, assert IRQ
 }
