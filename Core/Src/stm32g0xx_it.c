@@ -4,16 +4,6 @@
   * @file    stm32g0xx_it.c
   * @brief   Interrupt Service Routines.
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 
@@ -52,6 +42,9 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static uint8_t radio_rx_byte;
+static uint8_t radio_temp_buffer[RADIO_MESSAGE_MAX_LEN];
+static uint8_t radio_temp_index = 0;
 
 /* USER CODE END 0 */
 
@@ -61,7 +54,7 @@
 extern UART_HandleTypeDef huart5;
 extern UART_HandleTypeDef huart6;
 /* USER CODE BEGIN EV */
-
+extern radio_message_queue_t radio_message_queue;
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -181,12 +174,36 @@ void USART3_4_5_6_LPUART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART3_4_5_6_LPUART1_IRQn 0 */
 
+  if (huart5.Instance->ISR & USART_ISR_RXNE_RXFNE)
+  {
+      radio_rx_byte = (uint8_t)(huart5.Instance->RDR);
+      
+      if (radio_rx_byte == 0x00)
+      {
+          if (radio_temp_index > 0)
+          {
+              radio_message_enqueue(radio_temp_index, 
+                                  radio_temp_buffer,
+                                  &radio_message_queue);
+              radio_temp_index = 0;
+          }
+      }
+      else
+      {
+          if (radio_temp_index < RADIO_MESSAGE_MAX_LEN)
+          {
+              radio_temp_buffer[radio_temp_index] = radio_rx_byte;
+              radio_temp_index++;
+          }
+          else
+          {
+              radio_temp_index = 0;
+          }
+      }
+  }
   /* USER CODE END USART3_4_5_6_LPUART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart5);
   HAL_UART_IRQHandler(&huart6);
-  /* USER CODE BEGIN USART3_4_5_6_LPUART1_IRQn 1 */
-
-  /* USER CODE END USART3_4_5_6_LPUART1_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */

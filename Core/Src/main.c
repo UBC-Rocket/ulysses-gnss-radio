@@ -4,16 +4,6 @@
   * @file           : main.c
   * @brief          : Main program body
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -24,6 +14,7 @@
 #include "radio_queue.h"
 #include "gps_nema_queue.h"
 #include "spi_slave.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,7 +42,8 @@ UART_HandleTypeDef huart5;
 UART_HandleTypeDef huart6;
 
 /* USER CODE BEGIN PV */
-
+radio_message_queue_t radio_message_queue;
+gps_sample_queue_t gps_sample_queue;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -68,6 +60,67 @@ static void MX_USART6_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+uint8_t rx_buffer[1];
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        // Forward received byte to Radio (UART5) - NON-BLOCKING
+        HAL_UART_Transmit_IT(&huart5, rx_buffer, 1);
+        
+        // Echo back to ST-Link (so you see what you typed)
+        HAL_UART_Transmit(&huart1, rx_buffer, 1, 100);
+        
+        // Re-enable receive interrupt for next byte
+        HAL_UART_Receive_IT(&huart1, rx_buffer, 1);
+    }
+}
+
+bool radio_send(uint8_t *data, uint8_t len) {
+    if (len == 0 || len > 254) {
+        return false;  // Invalid length
+    }
+    
+    // Send data
+    HAL_StatusTypeDef status = HAL_UART_Transmit(&huart5, data, len, 1000);
+    
+    // Send null terminator
+    uint8_t null_byte = 0x00;
+    HAL_UART_Transmit(&huart5, &null_byte, 1, 100);
+    
+    return (status == HAL_OK);
+}
+
+/**
+ * Initialize radio driver (call once at startup)
+ */
+void radio_init(void) {
+    radio_message_queue_init(&radio_message_queue);
+    static uint8_t rx_byte;
+    HAL_UART_Receive_IT(&huart5, &rx_byte, 1);
+}
+
+/**
+ * Check if message available
+ * Returns: true if message waiting, false if queue empty
+ */
+bool radio_available(void) {
+    return !radio_message_queue_empty(&radio_message_queue);
+}
+
+/**
+ * Read received message
+ * @param buffer: Buffer to store message (must be 255 bytes)
+ * @return: Message length (0 if none available)
+ */
+uint8_t radio_read(uint8_t *buffer) {
+    if (radio_message_queue_empty(&radio_message_queue)) {
+        return 0;
+    }
+    radio_message_dequeue(&radio_message_queue, buffer);
+    return strlen((char*)buffer);
+}
 
 /* USER CODE END 0 */
 
@@ -113,16 +166,32 @@ int main(void)
   gps_sample_queue_init(&gps_sample_queue);
 
   spi_slave_init(&radio_message_queue, &gps_sample_queue);
+  radio_init();
 
+  HAL_UART_Transmit(&huart1, (uint8_t*)"Radio RX ready\r\n", 16, 100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
+      /* USER CODE BEGIN 3 */
 
-    /* USER CODE BEGIN 3 */
+      // Check if radio message received
+      if (radio_available()) {
+          uint8_t msg[255];
+          uint8_t len = radio_read(msg);
+          
+          if (len > 0) {
+              // Output to ST-Link UART (UART1)
+              HAL_UART_Transmit(&huart1, (uint8_t*)"RX: ", 4, 100);
+              HAL_UART_Transmit(&huart1, msg, len, 100);
+              HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
+          }
+      }
+      
+      HAL_Delay(10);
+      /* USER CODE END 3 */
   }
   /* USER CODE END 3 */
 }
@@ -186,7 +255,7 @@ static void MX_SPI1_Init(void)
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_SLAVE;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
+  hspi1.Init.DataSize = SPI_DATASIZE_4BIT; // TODO 4 bit? why not 8-bit
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_HARD_INPUT;

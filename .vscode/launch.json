@@ -1,13 +1,10 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "ulysses-gnss-radio - Debug",
+            "name": "Ulysses GNSS - Debug",
             "cwd": "${workspaceFolder}",
-            "executable": "${config:cmake.buildDirectory}/Debug/ulysses-gnss-radio.elf",
+            "executable": "${workspaceFolder}/build/Debug/ulysses-gnss-radio.elf",
             "request": "launch",
             "type": "cortex-debug",
             "servertype": "openocd",
