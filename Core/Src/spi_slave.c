@@ -46,6 +46,7 @@ static void spi_rx_dma_start(uint8_t *buf, uint16_t len);
 static void spi_tx_dma_start(uint8_t *buf, uint16_t len);
 static void spi_slave_arm(void);
 static void spi_slave_arm_push(void);
+static void spi_slave_arm_push_idle(void);
 static void spi_slave_arm_config(void);
 static void spi_clear_errors(void);
 static uint8_t radio_queue_count(radio_message_queue_t *q);
@@ -900,6 +901,100 @@ static void spi_slave_arm_push(void) {
 }
 
 /**
+ * @brief Arm SPI slave for push-ready idle state (STRICT MODE)
+ *
+ * This function arms the SPI in a "push-ready" idle state for PUSH mode only.
+ * Unlike spi_slave_arm() (pull mode) or spi_slave_arm_push() (active push),
+ * this state is waiting for data to become available before asserting IRQ.
+ *
+ * WHEN TO CALL THIS:
+ * ──────────────────
+ * - After a push transaction completes in PUSH mode
+ * - When s_protocol_mode == SPI_MODE_PUSH
+ * - To enforce strict protocol mode (no pull commands accepted)
+ *
+ * STATE MACHINE FLOW (PUSH MODE):
+ * ────────────────────────────────
+ * IDLE (this state) → [data available] → spi_slave_prepare_push()
+ *                                      → spi_slave_arm_push()
+ *                                      → HAVE_DATA (IRQ asserted)
+ *                                      → [master clocks data]
+ *                                      → ACTIVE
+ *                                      → [NSS rises]
+ *                                      → spi_slave_arm_push_idle() (back to IDLE)
+ *
+ * CONFIGURATION:
+ * ──────────────
+ * - State = IDLE (ready for new transaction)
+ * - TX/RX buffers zeroed (clean slate)
+ * - SPI enabled but no DMAs running yet
+ * - No RXNEIE (not needed in push mode, no command byte to capture)
+ * - DMAs will be configured and started when spi_slave_prepare_push() is called
+ *
+ * DIFFERENCE FROM spi_slave_arm() (PULL MODE):
+ * ─────────────────────────────────────────────
+ * Pull mode (spi_slave_arm):
+ * - RXNEIE enabled (waiting for command byte interrupt)
+ * - TX DMA armed for 261 bytes (max transaction)
+ * - RX DMA configured but RXDMAEN disabled (enabled in RXNE ISR)
+ * - Ready to respond to master commands immediately
+ *
+ * Push idle (this function):
+ * - No RXNEIE (not waiting for commands)
+ * - DMAs not started yet (will be started by spi_slave_prepare_push)
+ * - Waiting for spi_slave_tick() to detect data and prepare push
+ * - Master commands NOT supported in this state (strict push mode)
+ */
+static void spi_slave_arm_push_idle(void) {
+    // ── Step 1: Stop Everything ──
+    // Disable SPI and all DMA activity to safely reconfigure
+    SPI1->CR1 &= ~SPI_CR1_SPE;  // Disable SPI (flushes FIFOs)
+    SPI1->CR2 &= ~(SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN | SPI_CR2_RXNEIE);  // Disable all interrupts/DMA
+
+    // Disable both DMA channels
+    DMA1_Channel1->CCR &= ~DMA_CCR_EN;  // RX DMA off
+    DMA1_Channel2->CCR &= ~DMA_CCR_EN;  // TX DMA off
+
+    // Clear all DMA interrupt flags for both channels
+    DMA1->IFCR = DMA_IFCR_CGIF1 | DMA_IFCR_CGIF2;
+
+    // Clear SPI error flags and drain FIFO
+    spi_clear_errors();
+
+    // ── Step 2: Reset State ──
+    ctx.state = SPI_STATE_IDLE;  // Ready for new transaction
+    ctx.current_cmd = 0;         // No command (push mode doesn't use commands)
+    ctx.payload_processed = false;
+
+    // ── Step 3: Zero Buffers ──
+    // Clear TX and RX buffers to ensure clean state for next push
+    // When spi_slave_prepare_push() is called, it will load fresh data into tx_buf
+    memset(ctx.tx_buf, 0x00, sizeof(ctx.tx_buf));
+    memset(ctx.rx_buf, 0x00, sizeof(ctx.rx_buf));
+
+    // ── Step 4: Configure SPI for Push-Ready State ──
+    // Minimal configuration: 8-bit frames, 1-byte FIFO threshold
+    // NO RXNEIE: We don't wait for command bytes in push mode
+    // NO TXDMAEN/RXDMAEN: DMAs will be enabled when spi_slave_prepare_push() calls spi_slave_arm_push()
+    //
+    // This is a "dormant" state - SPI is enabled but not actively transferring.
+    // When data becomes available, spi_slave_tick() will call spi_slave_prepare_push(),
+    // which will configure and start the DMAs, then assert IRQ.
+    SPI1->CR2 = (7 << SPI_CR2_DS_Pos)    // 8-bit data frames (DS=0b0111)
+              | SPI_CR2_FRXTH;            // 1-byte FIFO threshold (trigger RXNE every byte)
+
+    // ── Step 5: Enable SPI ──
+    // SPI is now ready to accept a push transaction when data is available
+    SPI1->CR1 |= SPI_CR1_SPE;
+
+    // At this point:
+    // - state = IDLE
+    // - SPI enabled, waiting for spi_slave_tick() to prepare push
+    // - No IRQ asserted (IRQ line is low/inactive)
+    // - Master commands (pull mode) will NOT work in this state
+}
+
+/**
  * @brief Arm SPI slave for configuration frame reception
  *
  * Used on startup to wait for the configuration frame from the master.
@@ -1510,7 +1605,35 @@ void spi_slave_nss_exti_handler(void) {
         }
 
         // ── Re-arm for next transaction ──
-        spi_slave_arm();
+        // PROTOCOL MODE ENFORCEMENT (STRICT MODE):
+        // After any transaction completes, we re-arm based on the configured protocol mode.
+        // This ensures:
+        // - PUSH mode stays armed for push (strict enforcement, no pull commands accepted)
+        // - PULL mode stays armed for pull (command-based transactions only)
+        //
+        // s_protocol_mode is set during startup configuration frame reception:
+        // - 0x00 = SPI_MODE_PULL: Master-initiated, command-based protocol
+        // - 0x01 = SPI_MODE_PUSH: Slave-initiated via IRQ assertion
+        //
+        // WHY strict mode enforcement?
+        // - Prevents mode mixing (slave responding to commands while configured for push)
+        // - Ensures consistent behavior: PUSH mode = only push, PULL mode = only pull
+        // - Avoids deadlock: In push mode, RXNEIE is not enabled, so pull commands would hang
+        if (s_protocol_mode == SPI_MODE_PUSH) {
+            // Push mode: Arm in push-ready idle state
+            // - state = IDLE (waiting for data to become available)
+            // - No DMAs running yet (spi_slave_tick will configure when data ready)
+            // - No RXNEIE (not accepting pull commands)
+            // - IRQ not asserted yet (will be asserted when data available)
+            spi_slave_arm_push_idle();
+        } else {
+            // Pull mode: Arm in pull-ready state (default)
+            // - state = IDLE (waiting for master to send command)
+            // - RXNEIE enabled (ready to capture command byte)
+            // - TX DMA armed for max transaction size
+            // - RX DMA configured but gated (RXDMAEN enabled in RXNE ISR)
+            spi_slave_arm();
+        }
     }
 
     // Handle other EXTI lines if needed (not used in our design)
@@ -1806,6 +1929,29 @@ void spi_slave_tick(void) {
     // - Prevents IRQ line from toggling (which could confuse master's edge detector)
     if (ctx.irq_asserted) {
         return;
+    }
+
+    // ── CRITICAL GUARD: Check if NSS is Currently Low (Transaction Active) ──
+    // RACE CONDITION PREVENTION:
+    // If master has already asserted NSS (NSS = low), a transaction is in progress.
+    // Calling spi_slave_prepare_push() now would:
+    // 1. Call spi_slave_arm_push() which disables SPI during active transaction
+    // 2. Clear RX FIFO while MOSI data is arriving (data loss)
+    // 3. Modify TX buffer while DMA is reading from it (corruption)
+    // 4. Assert IRQ while NSS is already low (protocol violation)
+    //
+    // GPIO Pin State Reading:
+    // - GPIOA->IDR (Input Data Register) reads the current logic level of GPIO pins
+    // - GPIO_PIN_4 = PA4 (NSS pin)
+    // - If (IDR & GPIO_PIN_4) == 0, NSS is LOW → transaction active
+    // - If (IDR & GPIO_PIN_4) != 0, NSS is HIGH → bus idle
+    //
+    // Solution: If NSS is low, defer push to next tick (after current transaction completes)
+    if ((GPIOA->IDR & GPIO_PIN_4) == 0) {
+        // NSS is low = transaction in progress
+        // Increment diagnostic counter (if enabled in future)
+        // ctx.nss_collisions++;
+        return;  // Defer push to next tick
     }
 
     // ── Priority 1: Check for GPS Data ──
