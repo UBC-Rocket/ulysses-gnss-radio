@@ -67,6 +67,7 @@
 // ============================================================================
 
 typedef enum {
+    SPI_STATE_UNCONFIGURED,  // Waiting for configuration frame from master
     SPI_STATE_IDLE,          // No transaction, RX DMA armed, waiting for NSS or data
     SPI_STATE_HAVE_DATA,     // Push mode: IRQ asserted, TX+RX DMA armed, waiting for NSS
     SPI_STATE_ACTIVE,        // Mid-transaction (both TX and RX DMA running)

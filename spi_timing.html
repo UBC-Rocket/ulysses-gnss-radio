@@ -224,6 +224,27 @@
 <div class="doc-id">REV 0.1 — DRAFT — Feb 2026</div>
 
 <!-- ============================================================ -->
+<!-- DEPRECATION WARNING -->
+<!-- ============================================================ -->
+<div style="background: #ffe6e6; border: 3px solid #cc0000; padding: 20px; margin: 20px 0; border-radius: 4px;">
+  <h2 style="color: #cc0000; margin-top: 0;">⚠️ DEPRECATED DOCUMENT</h2>
+  <p style="font-size: 14px; line-height: 1.6; margin-bottom: 0;">
+    <strong>This document contains several inaccuracies and is no longer maintained.</strong><br/>
+    Last accurate as of: February 2026 (Rev 0.1 Draft)<br/><br/>
+    <strong>Known issues:</strong><br/>
+    • Incorrect dummy byte count (shows 2, actual is 4)<br/>
+    • Wrong IRQ polarity (shows active low, actual is active high)<br/>
+    • All transaction sizes are 2 bytes too small<br/>
+    • GPS push payload size shown as "TBD", actual is 48 bytes<br/>
+    • Collision detection described incorrectly<br/><br/>
+    <strong>For accurate information, refer to source code:</strong><br/>
+    <code>Core/Inc/protocol_config.h</code> — Protocol definitions and constants<br/>
+    <code>Core/Src/spi_slave.c</code> — Actual implementation<br/>
+    <code>README.md</code> — Up-to-date documentation
+  </p>
+</div>
+
+<!-- ============================================================ -->
 <h2>1. Signal Definitions</h2>
 
 <table class="reg-table">
@@ -232,7 +253,7 @@
   <tr><td>MOSI</td><td>Master → Slave</td><td>Master Out, Slave In</td></tr>
   <tr><td>MISO</td><td>Master ← Slave</td><td>Master In, Slave Out (Hi-Z when CS̄ high)</td></tr>
   <tr><td>CS̄</td><td>Master → Slave</td><td>Chip Select, active low</td></tr>
-  <tr><td>IRQ̄</td><td>Master ← Slave</td><td>Interrupt Request, active low, open-drain (push mode only)</td></tr>
+  <tr><td>IRQ</td><td>Master ← Slave</td><td>Interrupt Request, <strong>active high</strong> on PB2 (push mode only)</td></tr>
 </table>
 
 <div class="note-box">
@@ -243,19 +264,23 @@
 <h2>2. Command Byte Encoding</h2>
 
 <table class="reg-table">
-  <tr><th>Code</th><th>Mnemonic</th><th>Direction</th><th>Payload</th><th>Description</th></tr>
-  <tr><td>0x01</td><td>RADIO_RX_LIFO</td><td>Slave → Master</td><td>256 B</td><td>Most recent radio message (LIFO)</td></tr>
-  <tr><td>0x02</td><td>RADIO_RX_FIFO</td><td>Slave → Master</td><td>256 B</td><td>Oldest radio message (FIFO)</td></tr>
-  <tr><td>0x03</td><td>RADIO_RXBUF_LEN</td><td>Slave → Master</td><td>1 B</td><td>Number of buffered radio messages (0–255)</td></tr>
-  <tr><td>0x04</td><td>RADIO_TX</td><td>Master → Slave</td><td>256 B</td><td>Transmit radio message</td></tr>
-  <tr><td>0x05</td><td>GPS_RX</td><td>Slave → Master</td><td>87 B</td><td>Most recent raw NMEA sentence (pull mode only)</td></tr>
+  <tr><th>Code</th><th>Mnemonic</th><th>Direction</th><th>Payload</th><th>Total Size*</th><th>Description</th></tr>
+  <tr><td>0x01</td><td>RADIO_RX_LIFO</td><td>Slave → Master</td><td>256 B</td><td><strong>261 B</strong></td><td>Most recent radio message (LIFO)</td></tr>
+  <tr><td>0x02</td><td>RADIO_RX_FIFO</td><td>Slave → Master</td><td>256 B</td><td><strong>261 B</strong></td><td>Oldest radio message (FIFO)</td></tr>
+  <tr><td>0x03</td><td>RADIO_RXBUF_LEN</td><td>Slave → Master</td><td>1 B</td><td><strong>6 B</strong></td><td>Number of buffered radio messages (0–255)</td></tr>
+  <tr><td>0x04</td><td>RADIO_TX</td><td>Master → Slave</td><td>256 B</td><td><strong>261 B</strong></td><td>Transmit radio message</td></tr>
+  <tr><td>0x05</td><td>GPS_RX</td><td>Slave → Master</td><td>87 B</td><td><strong>92 B</strong></td><td>Most recent raw NMEA sentence (pull mode only)</td></tr>
 </table>
 
 <div class="note-box">
-  <strong>Startup configuration frame:</strong> On power-up, the slave waits for a SPI configuration word. Byte 0 selects mode: <code>0x00</code> = Pull, <code>0x01</code> = Push. Remaining bytes configure GPS parameters (rate, constellation mask, etc.). The mode selection also determines GPS data handling:
+  <strong>*Total Size = 1 cmd + 4 dummy + N payload bytes</strong> (Actual implementation uses 4 dummy bytes, not 2 as shown in diagrams below)
+</div>
+
+<div class="note-box">
+  <strong>Startup configuration frame (✓ IMPLEMENTED):</strong> On power-up, the slave waits for an 8-byte SPI configuration word. Byte 0 selects mode: <code>0x00</code> = Pull, <code>0x01</code> = Push. Remaining bytes configure GPS parameters (rate, constellation mask, reserved). The mode selection also determines GPS data handling:
   <br/><br/>
   <strong>Pull mode:</strong> GPS data is <em>raw NMEA pass-through</em> — the slave buffers the most recent NMEA sentence and serves it unmodified (up to 87 bytes).<br/>
-  <strong>Push mode:</strong> GPS data is <em>parsed on the slave</em> — the slave decodes NMEA internally and pushes a packed <code>gps_fix_t</code> struct (size TBD, likely ~40–50 bytes). The struct layout is determined by the configuration bytes.
+  <strong>Push mode:</strong> GPS data is <em>parsed on the slave</em> — the slave decodes NMEA internally and pushes a packed <code>gps_fix_t</code> struct (<strong>48 bytes</strong>, not TBD). The struct layout is defined in <code>protocol_config.h</code>.
 </div>
 
 <!-- ============================================================ -->
@@ -905,23 +930,23 @@
 
 <div class="two-col">
 <div>
-<h3>Pull Mode Transaction Sizes</h3>
+<h3>Pull Mode Transaction Sizes (⚠ CORRECTED)</h3>
 <table class="reg-table">
   <tr><th>Command</th><th>Total Bytes</th><th>Breakdown</th></tr>
-  <tr><td>0x01 / 0x02</td><td>259</td><td>1 cmd + 2 dum + 256 data</td></tr>
-  <tr><td>0x03</td><td>4</td><td>1 cmd + 2 dum + 1 data</td></tr>
-  <tr><td>0x04</td><td>259</td><td>1 cmd + 2 dum + 256 data</td></tr>
-  <tr><td>0x05</td><td>90</td><td>1 cmd + 2 dum + 87 data</td></tr>
+  <tr><td>0x01 / 0x02</td><td><strong>261</strong></td><td>1 cmd + <strong>4</strong> dum + 256 data</td></tr>
+  <tr><td>0x03</td><td><strong>6</strong></td><td>1 cmd + <strong>4</strong> dum + 1 data</td></tr>
+  <tr><td>0x04</td><td><strong>261</strong></td><td>1 cmd + <strong>4</strong> dum + 256 data</td></tr>
+  <tr><td>0x05</td><td><strong>92</strong></td><td>1 cmd + <strong>4</strong> dum + 87 data</td></tr>
 </table>
 </div>
 <div>
-<h3>Push Mode Transaction Sizes</h3>
+<h3>Push Mode Transaction Sizes (✓ ACCURATE)</h3>
 <table class="reg-table">
   <tr><th>Transaction</th><th>Total Bytes</th><th>Breakdown</th></tr>
   <tr><td>Status read</td><td>1</td><td>1 type byte on MISO</td></tr>
-  <tr><td>Radio payload</td><td>256</td><td>after type read</td></tr>
-  <tr><td>GPS payload</td><td>TBD</td><td>sizeof(gps_fix_t), parsed</td></tr>
-  <tr><td>Radio TX</td><td>256</td><td>no prefix</td></tr>
+  <tr><td>Radio payload</td><td>257</td><td>1 type + 256 data</td></tr>
+  <tr><td>GPS payload</td><td><strong>49</strong></td><td>1 type + <strong>48</strong> data (sizeof(gps_fix_t), parsed)</td></tr>
+  <tr><td>Radio TX</td><td>256</td><td>no prefix (simultaneous with push)</td></tr>
 </table>
 </div>
 </div>

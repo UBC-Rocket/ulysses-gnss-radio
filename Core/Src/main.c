@@ -131,7 +131,7 @@ int main(void)
   uart_callbacks_init(&huart1);
 #endif
 
-  HAL_UART_Transmit(&huart1, (uint8_t*)"System ready (push mode)\r\n", 26, 100);
+  HAL_UART_Transmit(&huart1, (uint8_t*)"System initialized - awaiting configuration from master\r\n", 57, 100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
