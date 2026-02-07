@@ -5,8 +5,8 @@ Dedicated GNSS receiver and radio transceiver slave board for the UBC Rocket Uly
 ## Overview
 
 The GNSS-Radio slave board interfaces with the Ulysses flight controller via SPI, providing:
-- **GPS/GNSS positioning** with NMEA sentence parsing
-- **Radio communication** via LoRa/LoRaWAN transceiver
+- **GPS/GNSS positioning** with NMEA sentence u-blox SAM-M10Q
+- **Radio communication** via RFD900x Radio Modem 
 - **Dual-mode SPI protocol** (pull and push) for flexible data exchange
 - **Debug injection system** for testing without physical peripherals (Debug builds only)
 
@@ -153,6 +153,17 @@ The SPI slave uses a **hybrid RXNE interrupt + DMA approach**:
 - **Transaction completion**: Detected via NSS rising edge (EXTI interrupt)
 
 This architecture provides a 4-byte time window to decode the command and prepare the response before the master clocks out the data region.
+
+### Peripheral Initialization Note
+
+**IMPORTANT**: The SPI peripheral initialization uses the STM32 HAL layer (`stm32g0xx_hal_msp.c`) to configure GPIO pins, enable clocks, and reserve the SPI1 peripheral. This HAL-based initialization ensures proper peripheral reservation and avoids conflicts with other code that might try to use SPI1.
+
+After HAL initialization completes, the SPI slave driver ([spi_slave.c](Core/Src/spi_slave.c)) takes over and uses **register-level programming** for all runtime operations. The HAL is only used during startup to:
+- Configure SPI1 GPIO pins (PA4-PA7) in alternate function mode
+- Enable peripheral clocks (SPI1, DMA1, DMAMUX, GPIOA, GPIOB)
+- Set up NVIC interrupt priorities
+
+This hybrid approach (HAL for init, registers for runtime) provides the best of both worlds: HAL's initialization convenience and register-level performance for time-critical operations.
 
 ### Why 4 Dummy Bytes?
 

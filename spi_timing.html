@@ -290,7 +290,7 @@
 
 <div class="diagram-container">
   <div class="diagram-title">Figure 3.1 — Pull Mode: Radio Read (cmd 0x01 shown)</div>
-  <div class="diagram-caption">Master-initiated read. 1 cmd byte + 2 dummy bytes + 256 data bytes = 259 bytes total on bus.</div>
+  <div class="diagram-caption">Master-initiated read. 1 cmd byte + <strong>4</strong> dummy bytes + 256 data bytes = <strong>261 bytes total</strong> on bus. (Diagram shows only 2 dummy bytes for visual clarity)</div>
   <svg viewBox="0 0 1100 260" width="1100" height="260">
     <!-- Grid lines -->
     <defs>
@@ -377,7 +377,7 @@
     <line x1="290" y1="226" x2="290" y2="234" stroke="var(--accent)" stroke-width="1"/>
     <line x1="460" y1="226" x2="460" y2="234" stroke="var(--accent)" stroke-width="1"/>
     <text x="375" y="245" class="phase-label">DUMMY</text>
-    <text x="375" y="254" class="data-label-small" fill="var(--accent)">2 bytes</text>
+    <text x="375" y="254" class="data-label-small" fill="var(--accent)">4 bytes</text>
 
     <!-- DATA phase -->
     <line x1="480" y1="230" x2="830" y2="230" stroke="var(--accent)" stroke-width="1"/>
@@ -392,7 +392,7 @@
 
 <div class="diagram-container">
   <div class="diagram-title">Figure 3.2 — Pull Mode: GPS Read (cmd 0x05)</div>
-  <div class="diagram-caption">Same framing as radio read. Raw NMEA pass-through (not parsed). 1 cmd + 2 dummy + 87 data = 90 bytes total.</div>
+  <div class="diagram-caption">Same framing as radio read. Raw NMEA pass-through (not parsed). 1 cmd + <strong>4</strong> dummy + 87 data = <strong>92 bytes total</strong>. (Diagram shows only 2 dummy bytes for visual clarity)</div>
   <svg viewBox="0 0 900 260" width="900" height="260">
     <text x="8" y="44" class="signal-label">CS̄</text>
     <text x="8" y="94" class="signal-label">SCK</text>
@@ -458,7 +458,7 @@
 
 <div class="diagram-container">
   <div class="diagram-title">Figure 3.3 — Pull Mode: Radio Buffer Length Query (cmd 0x03)</div>
-  <div class="diagram-caption">Shortest transaction. 1 cmd + 2 dummy + 1 data = 4 bytes total.</div>
+  <div class="diagram-caption">Shortest transaction. 1 cmd + <strong>4</strong> dummy + 1 data = <strong>6 bytes total</strong>. (Diagram shows only 2 dummy bytes for visual clarity)</div>
   <svg viewBox="0 0 650 260" width="650" height="260">
     <text x="8" y="44" class="signal-label">CS̄</text>
     <text x="8" y="94" class="signal-label">SCK</text>
@@ -516,7 +516,7 @@
 
 <div class="diagram-container">
   <div class="diagram-title">Figure 3.4 — Pull Mode: Radio TX (cmd 0x04)</div>
-  <div class="diagram-caption">Master writes command then payload. 1 cmd + 2 dummy + 256 data = 259 bytes. MISO ignored.</div>
+  <div class="diagram-caption">Master writes command then payload. 1 cmd + <strong>4</strong> dummy + 256 data = <strong>261 bytes</strong>. MISO ignored. (Diagram shows only 2 dummy bytes for visual clarity)
   <svg viewBox="0 0 1100 260" width="1100" height="260">
     <text x="8" y="44" class="signal-label">CS̄</text>
     <text x="8" y="94" class="signal-label">SCK</text>

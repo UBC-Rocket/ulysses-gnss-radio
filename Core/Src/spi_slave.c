@@ -376,6 +376,20 @@ static void exti_nss_init(void) {
     // We set bit 4 to enable rising edge detection on line 4 (PA4).
     EXTI->RTSR1 |= (1 << NSS_EXTI_LINE);
 
+    // ── Enable Falling Edge Trigger ──
+    // FTSR1 (Falling Trigger Selection Register 1) controls falling edge triggers.
+    // Bit N = 1: Falling edge on line N triggers interrupt
+    // Bit N = 0: Falling edge on line N ignored
+    //
+    // WHY ALSO falling edge?
+    // - Falling edge (high → low) = transaction START
+    // - We use this to set nss_busy flag, preventing IRQ assertion mid-transaction
+    // - This prevents GPS/Radio push from asserting IRQ while master is sending radio TX
+    // - Without this, slave could start clocking GPS on MISO while master isn't reading MISO
+    //
+    // We set bit 4 to enable falling edge detection on line 4 (PA4).
+    EXTI->FTSR1 |= (1 << NSS_EXTI_LINE);
+
     // ── Unmask the Interrupt ──
     // IMR1 (Interrupt Mask Register 1) controls which EXTI lines can generate interrupts.
     // Bit N = 1: Line N can trigger interrupt (unmasked)
@@ -1048,6 +1062,19 @@ static void spi_slave_arm_config(void) {
  * @param push_type PUSH_TYPE_RADIO or PUSH_TYPE_GPS
  */
 static void spi_slave_prepare_push(uint8_t push_type) {
+    // ── CRITICAL: Check if master is currently mid-transaction ──
+    // If NSS is low (busy flag set), master is actively clocking.
+    // Asserting IRQ now would cause slave to start pushing data on MISO,
+    // but master isn't reading MISO (it's sending on MOSI).
+    // Result: GPS/Radio push data would be LOST.
+    //
+    // Solution: Defer push to next tick. Data stays in queue, will be sent
+    // after master completes current transaction (NSS rises, busy flag clears).
+    if (ctx.nss_busy) {
+        ctx.irq_deferred_busy++;  // Diagnostic counter
+        return;  // Exit early - do NOT prepare push, do NOT assert IRQ
+    }
+
     // Zero the TX buffer first
     memset(ctx.tx_buf, 0x00, sizeof(ctx.tx_buf));
 
@@ -1291,7 +1318,34 @@ void spi_slave_dma1_ch1_irq_handler(void) {
  */
 void spi_slave_nss_exti_handler(void) {
 
-    // ── Check if this is NSS rising edge (line 4) ──
+    // ── Check for falling edge (NSS asserted = transaction start) ──
+    // FPR1 (Falling edge Pending Register 1) has a bit set for each EXTI line that detected a falling edge.
+    // Bit 4 corresponds to EXTI line 4 (PA4 = NSS).
+    //
+    // WHY handle falling edge?
+    // - Falling edge (high → low) = master asserts NSS, transaction begins
+    // - We set nss_busy flag to prevent slave from asserting IRQ mid-transaction
+    // - This prevents GPS/Radio push from interfering with active master radio TX
+    //
+    // CRITICAL: Handle falling edge FIRST before rising edge check.
+    uint32_t falling_pending = EXTI->FPR1 & (1 << NSS_EXTI_LINE);
+
+    if (falling_pending) {
+        // ── Clear falling edge pending flag ──
+        // FPR1 is write-1-to-clear: writing 1 to bit 4 clears the pending flag.
+        EXTI->FPR1 = (1 << NSS_EXTI_LINE);
+
+        // ── Set busy flag ──
+        // Master is now active (NSS low = transaction in progress).
+        // Prevent spi_slave_prepare_push() from asserting IRQ during this transaction.
+        ctx.nss_busy = true;
+        ctx.nss_falling_events++;
+
+        // Nothing else to do on falling edge - return immediately
+        return;
+    }
+
+    // ── Check for rising edge (NSS deasserted = transaction complete) ──
     // RPR1 (Rising edge Pending Register 1) has a bit set for each EXTI line that detected a rising edge.
     // Bit 4 corresponds to EXTI line 4 (PA4 = NSS).
     //
@@ -1299,14 +1353,22 @@ void spi_slave_nss_exti_handler(void) {
     // - This handler covers EXTI lines 4-15 (EXTI4_15_IRQn)
     // - Other EXTI lines (5, 6, ..., 15) might share this handler
     // - We only care about line 4 (NSS), so we check bit 4 specifically
-    if (EXTI->RPR1 & (1 << NSS_EXTI_LINE)) {
-        // ── Clear pending flag ──
+    uint32_t rising_pending = EXTI->RPR1 & (1 << NSS_EXTI_LINE);
+
+    if (rising_pending) {
+        // ── Clear rising edge pending flag ──
         // RPR1 is write-1-to-clear: writing 1 to bit 4 clears the pending flag.
         // This MUST be done to acknowledge the interrupt, or it will fire again immediately.
         //
         // Note: We write ONLY bit 4, not all bits. Writing 1s to other bits would
         // accidentally clear pending flags for other EXTI lines.
         EXTI->RPR1 = (1 << NSS_EXTI_LINE);
+
+        // ── Clear busy flag ──
+        // Transaction complete (NSS high = master released chip select).
+        // Safe to assert IRQ again for push mode.
+        ctx.nss_busy = false;
+        ctx.nss_rising_events++;
 
         // ── Handle based on state ──
         switch (ctx.state) {
@@ -1395,16 +1457,13 @@ void spi_slave_nss_exti_handler(void) {
             // 4. Master released NSS (rising edge) → this interrupt fires
             //
             // Now we finalize the push transaction:
-            // - Deassert IRQ (signal complete)
-            // - Check if we successfully sent the data (pop queue if yes)
+            // - Verify FULL message was transmitted (CRITICAL for data integrity)
+            // - Deassert IRQ ONLY if transmission complete
+            // - Pop message from queue ONLY if transmission complete
+            // - If incomplete: Keep IRQ high, keep message in queue (automatic retry)
             // - Check if master sent data back simultaneously (enqueue if yes)
 
-            // ── Deassert IRQ First ──
-            // CRITICAL: IRQ must be deasserted BEFORE we check for more data to push.
-            // If we left IRQ asserted, master would think we have more data and start another transaction.
-            spi_slave_deassert_irq();
-
-            // ── Check How Many Bytes We Transmitted ──
+            // ── Check How Many Bytes We Transmitted (TX DMA Verification) ──
             // CNDTR (Channel Number of Data to Transfer Register) counts DOWN from initial length to 0.
             // If CNDTR > 0, the DMA didn't finish (master ended transaction early).
             // If CNDTR = 0, all bytes were sent successfully.
@@ -1413,28 +1472,57 @@ void spi_slave_nss_exti_handler(void) {
             // - Initial: CNDTR = 49, tx_sent = 0
             // - After 1 byte: CNDTR = 48, tx_sent = 1
             // - After 49 bytes: CNDTR = 0, tx_sent = 49 (success!)
+            //
+            // CRITICAL: We require the FULL message to be transmitted (tx_sent >= tx_dma_length).
+            // Partial transmission = incomplete message = data loss if we dequeue.
+            // Solution: Keep IRQ high, keep message in queue, master will retry.
             {
                 uint16_t tx_remaining = DMA1_Channel2->CNDTR;
                 uint16_t tx_sent = ctx.tx_dma_length - tx_remaining;
 
-                // ── Pop Message from Queue if Transmitted Successfully ──
-                // We only pop the message if we sent at least the TYPE byte (1 byte).
-                // In practice, if master read the TYPE byte, it should read the full payload,
-                // but we're defensive here in case of early abort.
-                //
-                // WHY >= PUSH_TYPE_BYTES (1 byte)?
-                // - If tx_sent = 0, the transaction aborted before we sent anything (glitch, master error)
-                // - If tx_sent >= 1, we at least sent the TYPE byte, so master knows what data it got
-                // - We could be stricter (require full payload), but 1 byte is a reasonable minimum
-                if (tx_sent >= PUSH_TYPE_BYTES) {
-                    // Remove the message from the queue - it's been sent
+                // Store for diagnostics
+                ctx.tx_dma_sent = tx_sent;
+
+                // ── Verify TX Completion ──
+                if (tx_sent >= ctx.tx_dma_length) {
+                    // ✅ SUCCESS: Full message transmitted
+                    //
+                    // Deassert IRQ to signal completion to master.
+                    // If we left IRQ high, master would think we have more data and start another transaction.
+                    spi_slave_deassert_irq();
+
+                    // Remove the message from the queue - it's been sent successfully
                     if (ctx.pending_push_type == PUSH_TYPE_RADIO && ctx.radio_queue) {
                         radio_message_queue_pop(ctx.radio_queue);
                     } else if (ctx.pending_push_type == PUSH_TYPE_GPS && ctx.gps_queue) {
                         gps_sample_queue_pop(ctx.gps_queue);
                     }
 
+                    // Clear pending push type (no longer have pending push)
+                    ctx.pending_push_type = 0;
+
                     ctx.push_transactions++;  // Increment successful push counter
+
+                } else {
+                    // ❌ INCOMPLETE: Not enough bytes transmitted
+                    //
+                    // Master ended transaction early (stopped clocking before full message sent).
+                    // This could happen if:
+                    // - Master bug (stopped early)
+                    // - Master timed out
+                    // - Electrical glitch (NSS noise)
+                    //
+                    // CRITICAL: Do NOT deassert IRQ, do NOT dequeue message!
+                    // - IRQ stays HIGH → master sees we still have data
+                    // - Message stays in queue → same data available for retry
+                    // - Next transaction: Master reads full message successfully
+                    //
+                    // This guarantees ZERO dropped messages on MISO.
+                    ctx.tx_incomplete_count++;  // Diagnostic counter
+
+                    // NOTE: We do NOT call spi_slave_deassert_irq() here!
+                    // NOTE: We do NOT pop from queue!
+                    // NOTE: pending_push_type stays set (indicates retry needed)
                 }
 
                 // ── Check for Simultaneous Master TX ──
@@ -1634,9 +1722,12 @@ void spi_slave_nss_exti_handler(void) {
             // - RX DMA configured but gated (RXDMAEN enabled in RXNE ISR)
             spi_slave_arm();
         }
-    }
 
-    // Handle other EXTI lines if needed (not used in our design)
+    }  // End of if (rising_pending)
+
+    // Note: If neither falling nor rising edge was pending (shouldn't happen),
+    // we simply return. This handles the case where multiple EXTI lines share
+    // this handler but we only configured line 4.
 }
 
 // ============================================================================
@@ -1949,8 +2040,8 @@ void spi_slave_tick(void) {
     // Solution: If NSS is low, defer push to next tick (after current transaction completes)
     if ((GPIOA->IDR & GPIO_PIN_4) == 0) {
         // NSS is low = transaction in progress
-        // Increment diagnostic counter (if enabled in future)
-        // ctx.nss_collisions++;
+        // Increment diagnostic counter
+        ctx.nss_collisions++;
         return;  // Defer push to next tick
     }
 

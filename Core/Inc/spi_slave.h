@@ -110,10 +110,19 @@ typedef struct {
 
     // ── Push Mode State ──
     volatile bool irq_asserted;           // True when IRQ line is asserted (active low)
+    volatile bool nss_busy;               // True when NSS low (transaction active, set by EXTI falling edge)
     volatile uint8_t pending_push_type;   // PUSH_TYPE_RADIO or PUSH_TYPE_GPS (0 = none)
-    volatile uint16_t tx_dma_length;      // Length of current TX DMA transfer
+    volatile uint16_t tx_dma_length;      // Length of current TX DMA transfer (expected)
+    volatile uint16_t tx_dma_sent;        // Actual bytes transmitted (measured from CNDTR)
     volatile uint32_t push_transactions;  // Count of push mode transactions
     volatile uint32_t master_tx_received; // Count of master TX while pushing (simultaneous)
+
+    // ── Push Mode Diagnostics ──
+    volatile uint32_t nss_collisions;         // spi_slave_tick() called while NSS low
+    volatile uint32_t irq_deferred_busy;      // IRQ assertion deferred due to busy flag
+    volatile uint32_t tx_incomplete_count;    // TX DMA incomplete at NSS rising
+    volatile uint32_t nss_falling_events;     // NSS falling edges detected
+    volatile uint32_t nss_rising_events;      // NSS rising edges detected
 
 } spi_slave_context_t;
 
