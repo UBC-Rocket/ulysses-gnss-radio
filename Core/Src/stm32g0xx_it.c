@@ -13,8 +13,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "spi_slave.h"
-#include "radio_driver.h"
-// #include "gps_driver.h"  // TODO: Add when GPS driver is implemented
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -214,19 +212,7 @@ void USART1_IRQHandler(void)
 void USART3_4_5_6_LPUART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART3_4_5_6_LPUART1_IRQn 0 */
-  // Handle radio UART (USART5) RX directly for efficiency
-  if (huart5.Instance->ISR & USART_ISR_RXNE_RXFNE)
-  {
-      uint8_t byte = (uint8_t)(huart5.Instance->RDR);
-      radio_rx_byte_handler(byte);
-  }
 
-  // TODO: Handle GPS UART (USART6) RX when GPS driver is implemented
-  // if (huart6.Instance->ISR & USART_ISR_RXNE_RXFNE)
-  // {
-  //     uint8_t byte = (uint8_t)(huart6.Instance->RDR);
-  //     gps_rx_byte_handler(byte);
-  // }
   /* USER CODE END USART3_4_5_6_LPUART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart5);
   HAL_UART_IRQHandler(&huart6);

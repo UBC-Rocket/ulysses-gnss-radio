@@ -11,6 +11,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <string.h>
 #include "radio_queue.h"
 #include "gps_nema_queue.h"
 #include "spi_slave.h"
@@ -110,6 +111,7 @@ int main(void)
   MX_USART5_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
+
   // Initialize GPS queue (for raw NMEA)
   gps_sample_queue_init(&gps_sample_queue);
 
@@ -119,19 +121,48 @@ int main(void)
 
   // Initialize radio driver (handles its own queue initialization)
   radio_init(&radio_rx_queue);
+#ifdef DEBUG
+  // Initialize debug UART system (injection + logging, uses DMA + IDLE)
+  debug_uart_init(&radio_rx_queue, &gps_sample_queue);
+  HAL_UART_Transmit(&huart1, (uint8_t*)"System initialized - awaiting configuration from master\r\n", 57, 100);
+#endif
+
+  // Wait for configuration frame from master (blocking)
+  config_frame_t config_frame;
+  HAL_StatusTypeDef status = HAL_SPI_Receive(&hspi1, (uint8_t*)&config_frame, sizeof(config_frame_t), HAL_MAX_DELAY);
+
+  if (status == HAL_OK) {
+      // Parse and validate the mode
+      spi_protocol_mode_t mode;
+      if (config_frame.mode == SPI_MODE_PULL) {
+          mode = SPI_MODE_PULL;
+      } else if (config_frame.mode == SPI_MODE_PUSH) {
+          mode = SPI_MODE_PUSH;
+      } else {
+          // Invalid mode - default to PULL (safe fallback)
+          mode = SPI_MODE_PULL;
+      }
+
+      // Set protocol mode for SPI slave and GPS
+      spi_slave_set_protocol_mode(mode);
+      gps_set_protocol_mode(mode);
+
+#ifdef DEBUG
+      const char* mode_str = (mode == SPI_MODE_PUSH) ? "PUSH" : "PULL";
+      HAL_UART_Transmit(&huart1, (uint8_t*)"Configuration received - Mode: ", 31, 100);
+      HAL_UART_Transmit(&huart1, (uint8_t*)mode_str, strlen(mode_str), 100);
+      HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
+#endif
+  } else {
+#ifdef DEBUG
+      HAL_UART_Transmit(&huart1, (uint8_t*)"ERROR: Failed to receive configuration frame\r\n", 46, 100);
+#endif
+  }
 
   // Initialize SPI slave (uses radio queue and GPS queue)
   spi_slave_init(&radio_rx_queue, &gps_sample_queue);
 
-#ifdef DEBUG
-  // Initialize debug UART system (injection + logging, uses DMA + IDLE)
-  debug_uart_init(&radio_rx_queue, &gps_sample_queue);
-#else
-  // Initialize UART callback system (per-byte interrupt for debug console)
-  uart_callbacks_init(&huart1);
-#endif
 
-  HAL_UART_Transmit(&huart1, (uint8_t*)"System initialized - awaiting configuration from master\r\n", 57, 100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -151,7 +182,6 @@ int main(void)
 #ifdef DEBUG
       // Process and transmit pending debug log messages
       debug_uart_process_logs();
-#endif
 
       // Check if radio message received (for debug output)
       if (radio_available()) {
@@ -165,13 +195,12 @@ int main(void)
               HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
           }
       }
+#endif
       
       HAL_Delay(1);  // Reduced delay for faster push response
-  /* USER CODE END 3 */
   }
-  /* USER CODE BEGIN WHILE */
+  /* USER CODE END 3 */
 }
-/* USER CODE END WHILE */
 
 /**
   * @brief System Clock Configuration
@@ -193,7 +222,13 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSIDiv = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV1;
+  RCC_OscInitStruct.PLL.PLLN = 8;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -203,11 +238,11 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -232,7 +267,7 @@ static void MX_SPI1_Init(void)
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_SLAVE;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_HARD_INPUT;

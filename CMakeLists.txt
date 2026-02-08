@@ -53,6 +53,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
     # Debug UART support - injection and logging (conditional compilation via #ifdef DEBUG)
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/debug_uart.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/uart_callbacks.c
 
     # lwgps library
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/lwgps/lwgps/src/lwgps/lwgps.c

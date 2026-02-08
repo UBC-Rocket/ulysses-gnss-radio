@@ -114,13 +114,4 @@ void radio_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size);
  */
 void radio_uart_error_callback(UART_HandleTypeDef *huart);
 
-/**
- * @brief Legacy per-byte handler (not used in DMA mode)
- *
- * Kept for compatibility. Does nothing in DMA mode.
- *
- * @param byte Received byte
- */
-void radio_rx_byte_handler(uint8_t byte);
-
 #endif /* RADIO_DRIVER_H */

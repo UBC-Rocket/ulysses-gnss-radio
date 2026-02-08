@@ -131,15 +131,28 @@ typedef struct {
 // ============================================================================
 
 /**
- * @brief Initialize SPI slave peripheral in pull mode
+ * @brief Initialize SPI slave peripheral
  *
  * Configures SPI1 as slave with hardware NSS, sets up DMA channels,
- * and arms for the first transaction.
+ * and arms for operation based on the protocol mode.
+ *
+ * IMPORTANT: Must call spi_slave_set_protocol_mode() BEFORE this function
+ * to configure whether to operate in pull or push mode.
  *
  * @param radio_queue Pointer to radio message queue
  * @param gps_queue Pointer to GPS sample queue
  */
 void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_queue);
+
+/**
+ * @brief Set the protocol mode (pull or push)
+ *
+ * Must be called after receiving and parsing the configuration frame
+ * from the master, but before calling spi_slave_init().
+ *
+ * @param mode SPI_MODE_PULL or SPI_MODE_PUSH
+ */
+void spi_slave_set_protocol_mode(spi_protocol_mode_t mode);
 
 /**
  * @brief Get current state (for debugging)

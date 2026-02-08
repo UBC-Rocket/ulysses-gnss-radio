@@ -189,13 +189,6 @@ void radio_uart_error_callback(UART_HandleTypeDef *huart)
     __HAL_DMA_ENABLE_IT(huart5.hdmarx, DMA_IT_HT);
 }
 
-/* Legacy per-byte handler - no longer used but kept for compatibility */
-void radio_rx_byte_handler(uint8_t byte)
-{
-    (void)byte;
-    /* Not used in DMA mode */
-}
-
 /* ============================================================================
  * Private Functions
  * ============================================================================ */

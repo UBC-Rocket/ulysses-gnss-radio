@@ -1735,7 +1735,11 @@ void spi_slave_nss_exti_handler(void) {
 // ============================================================================
 
 /**
- * @brief Initialize SPI slave in pull mode
+ * @brief Initialize SPI slave peripheral
+ *
+ * Configures SPI1 as slave with hardware NSS, sets up DMA channels,
+ * and arms for operation based on the protocol mode set by
+ * spi_slave_set_protocol_mode().
  */
 void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_queue) {
     // Clear context structure
@@ -1767,9 +1771,16 @@ void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_
 
     // EXTI already enabled in exti_nss_init()
 
-    // ── Arm for configuration frame reception ──
-    // Wait for master to send configuration frame before normal operation
-    spi_slave_arm_config();
+    // ── Arm for normal operation based on configured mode ──
+    // The protocol mode must have been set via spi_slave_set_protocol_mode()
+    // before calling this function (typically after receiving config frame).
+    if (s_protocol_mode == SPI_MODE_PUSH) {
+        // Push mode: Arm in push-ready idle state
+        spi_slave_arm_push_idle();
+    } else {
+        // Pull mode: Arm for command-based transactions (default)
+        spi_slave_arm();
+    }
 }
 
 /**
@@ -1794,6 +1805,19 @@ void spi_slave_reset_errors(void) {
     ctx.transfer_errors = 0;
     ctx.unknown_commands = 0;
     ctx.master_tx_received = 0;
+}
+
+/**
+ * @brief Set the protocol mode (pull or push)
+ *
+ * This function sets the static protocol mode variable that determines
+ * how the SPI slave operates. Must be called after receiving and parsing
+ * the configuration frame from the master.
+ *
+ * @param mode SPI_MODE_PULL (0x00) or SPI_MODE_PUSH (0x01)
+ */
+void spi_slave_set_protocol_mode(spi_protocol_mode_t mode) {
+    s_protocol_mode = mode;
 }
 
 // ============================================================================
