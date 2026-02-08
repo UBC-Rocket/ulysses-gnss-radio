@@ -106,6 +106,14 @@ radio_message_queue_t *radio_get_rx_queue(void);
 void radio_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size);
 
 /**
+ * @brief Restart DMA reception after HAL stops it (IDLE/TC)
+ *
+ * Call from HAL_UARTEx_RxEventCallback after radio_rx_event_callback.
+ * Do NOT call from CM handler (DMA is still running during CM).
+ */
+void radio_restart_dma(void);
+
+/**
  * @brief UART error callback
  *
  * Call from HAL_UART_ErrorCallback. Restarts DMA on error.

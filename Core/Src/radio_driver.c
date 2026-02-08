@@ -1,12 +1,10 @@
 /**
  * @file radio_driver.c
- * @brief Radio transceiver driver using DMA + IDLE line detection
+ * @brief Radio transceiver driver using DMA circular + Character Match
  *
- * Receives null-terminated messages from radio via UART5 using DMA in circular mode.
- * Interrupts only on:
- *   - IDLE line detection (end of transmission burst)
- *   - DMA Half-Transfer (buffer 50% full)
- *   - DMA Transfer-Complete (buffer wrap-around)
+ * Receives null-terminated messages from radio via UART5 using DMA
+ * in circular mode with Character Match on 0x00 as the sole interrupt
+ * trigger. DMA never stops — no restart gaps, no data loss.
  *
  * TX: Messages are sent followed by null terminator (0x00).
  * RX: Bytes accumulate until 0x00 delimiter, then message is enqueued.
@@ -76,13 +74,15 @@ void radio_init(radio_message_queue_t *queue)
     memset(s_dma_buf, 0, sizeof(s_dma_buf));
     memset(s_msg_buf, 0, sizeof(s_msg_buf));
 
-    /* Start DMA receive with IDLE line detection (kept as safety net) */
-    HAL_UARTEx_ReceiveToIdle_DMA(&huart5, s_dma_buf, RADIO_DMA_BUF_SIZE);
-    __HAL_DMA_ENABLE_IT(huart5.hdmarx, DMA_IT_HT);
-
-    /* Configure Character Match on null byte (0x00) - primary trigger */
+    /* ADD[7:0] can only be written when UE=0 or RE=0 (RM0444) */
+    __HAL_UART_DISABLE(&huart5);
     MODIFY_REG(huart5.Instance->CR2, USART_CR2_ADD,
                ((uint32_t)0x00 << USART_CR2_ADD_Pos));
+    __HAL_UART_ENABLE(&huart5);
+
+    /* Start DMA circular reception (no IDLE — CM is the only trigger) */
+    HAL_UART_Receive_DMA(&huart5, s_dma_buf, RADIO_DMA_BUF_SIZE);
+    __HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT | DMA_IT_TC);
     __HAL_UART_ENABLE_IT(&huart5, UART_IT_CM);
 
     s_initialized = true;
@@ -177,7 +177,7 @@ void radio_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size)
 }
 
 /**
- * @brief Called on UART error - restarts DMA
+ * @brief Called on UART error - restarts circular DMA
  */
 void radio_uart_error_callback(UART_HandleTypeDef *huart)
 {
@@ -185,11 +185,11 @@ void radio_uart_error_callback(UART_HandleTypeDef *huart)
         return;
     }
 
-    /* Reset and restart DMA + Character Match */
+    /* Reset and restart circular DMA + CM */
     s_last_pos = 0;
     s_msg_len = 0;
-    HAL_UARTEx_ReceiveToIdle_DMA(&huart5, s_dma_buf, RADIO_DMA_BUF_SIZE);
-    __HAL_DMA_ENABLE_IT(huart5.hdmarx, DMA_IT_HT);
+    HAL_UART_Receive_DMA(&huart5, s_dma_buf, RADIO_DMA_BUF_SIZE);
+    __HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT | DMA_IT_TC);
     __HAL_UART_ENABLE_IT(&huart5, UART_IT_CM);
 }
 

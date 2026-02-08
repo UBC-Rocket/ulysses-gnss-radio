@@ -121,8 +121,10 @@ int main(void)
 
   // Initialize radio driver (handles its own queue initialization)
   radio_init(&radio_rx_queue);
+  // Start USART1 DMA reception + Character Match on '\n'
 #ifdef DEBUG
-  // Initialize debug UART system (injection + logging, uses DMA + IDLE)
+  // Initialize debug UART system (injection + logging)
+  uart_callbacks_init(&huart1);
   debug_uart_init(&radio_rx_queue, &gps_sample_queue);
   HAL_UART_Transmit(&huart1, (uint8_t*)"System initialized - awaiting configuration from master\r\n", 57, 100);
 #endif

@@ -58,10 +58,15 @@ void uart_callbacks_init(UART_HandleTypeDef *huart1_handle)
 {
     uart1_last_pos = 0;
 
-    /* USART1: Start DMA circular reception + Character Match on '\n' */
-    HAL_UARTEx_ReceiveToIdle_DMA(huart1_handle, uart1_dma_buf, UART1_DMA_BUF_SIZE);
+    /* ADD[7:0] can only be written when UE=0 or RE=0 (RM0444) */
+    __HAL_UART_DISABLE(huart1_handle);
     MODIFY_REG(huart1_handle->Instance->CR2, USART_CR2_ADD,
                ((uint32_t)'\n' << USART_CR2_ADD_Pos));
+    __HAL_UART_ENABLE(huart1_handle);
+
+    /* USART1: Start DMA circular reception (no IDLE — CM is the only trigger) */
+    HAL_UART_Receive_DMA(huart1_handle, uart1_dma_buf, UART1_DMA_BUF_SIZE);
+    __HAL_DMA_DISABLE_IT(huart1_handle->hdmarx, DMA_IT_HT | DMA_IT_TC);
     __HAL_UART_ENABLE_IT(huart1_handle, UART_IT_CM);
 }
 
@@ -178,8 +183,10 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     }
     else if (huart->Instance == USART5)
     {
-        /* Radio DMA event (IDLE safety net - CM is primary trigger) */
+        /* Radio DMA event (IDLE safety net - CM is primary trigger).
+         * HAL stops Normal-mode DMA after this callback, so restart. */
         radio_rx_event_callback(huart, Size);
+        radio_restart_dma();
     }
     /* USART1: CM is the only trigger we care about, ignore IDLE/HT/TC */
 }
