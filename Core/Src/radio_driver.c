@@ -76,11 +76,14 @@ void radio_init(radio_message_queue_t *queue)
     memset(s_dma_buf, 0, sizeof(s_dma_buf));
     memset(s_msg_buf, 0, sizeof(s_msg_buf));
 
-    /* Start DMA receive with IDLE line detection */
+    /* Start DMA receive with IDLE line detection (kept as safety net) */
     HAL_UARTEx_ReceiveToIdle_DMA(&huart5, s_dma_buf, RADIO_DMA_BUF_SIZE);
-
-    /* Enable DMA Half-Transfer interrupt for periodic processing */
     __HAL_DMA_ENABLE_IT(huart5.hdmarx, DMA_IT_HT);
+
+    /* Configure Character Match on null byte (0x00) - primary trigger */
+    MODIFY_REG(huart5.Instance->CR2, USART_CR2_ADD,
+               ((uint32_t)0x00 << USART_CR2_ADD_Pos));
+    __HAL_UART_ENABLE_IT(&huart5, UART_IT_CM);
 
     s_initialized = true;
 }
@@ -182,11 +185,12 @@ void radio_uart_error_callback(UART_HandleTypeDef *huart)
         return;
     }
 
-    /* Reset and restart DMA */
+    /* Reset and restart DMA + Character Match */
     s_last_pos = 0;
     s_msg_len = 0;
     HAL_UARTEx_ReceiveToIdle_DMA(&huart5, s_dma_buf, RADIO_DMA_BUF_SIZE);
     __HAL_DMA_ENABLE_IT(huart5.hdmarx, DMA_IT_HT);
+    __HAL_UART_ENABLE_IT(&huart5, UART_IT_CM);
 }
 
 /* ============================================================================

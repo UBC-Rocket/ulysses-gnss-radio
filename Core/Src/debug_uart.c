@@ -24,9 +24,6 @@ extern UART_HandleTypeDef huart1;
  * Module Variables
  * ============================================================================ */
 
-/** DMA circular buffer for RX injection */
-uint8_t debug_uart_rx_buffer[DEBUG_UART_RX_BUFFER_SIZE];
-
 /** Log message queue */
 static debug_log_queue_t log_queue;
 
@@ -35,9 +32,6 @@ static radio_message_queue_t *radio_queue = NULL;
 
 /** GPS NMEA queue pointer (for injection) */
 static gps_sample_queue_t *gps_queue = NULL;
-
-/** Last processed RX buffer position (for DMA circular buffer tracking) */
-static uint16_t last_rx_pos = 0;
 
 /* ============================================================================
  * Internal Function Prototypes
@@ -56,53 +50,25 @@ static void format_hex_ascii(char *out, size_t out_size, const uint8_t *data, ui
 
 void debug_uart_init(radio_message_queue_t *radio_q, gps_sample_queue_t *gps_q)
 {
-    // Store queue pointers
     radio_queue = radio_q;
     gps_queue = gps_q;
 
-    // Initialize log queue
     log_queue.head = 0;
     log_queue.tail = 0;
-
-    // Initialize RX position tracker
-    last_rx_pos = 0;
-
-    // Start DMA reception with IDLE interrupt
-    HAL_UARTEx_ReceiveToIdle_DMA(&huart1, debug_uart_rx_buffer, DEBUG_UART_RX_BUFFER_SIZE);
+    /* USART1 DMA reception is started by uart_callbacks_init() */
 }
 
 /* ============================================================================
  * Public API - Injection (RX)
  * ============================================================================ */
 
-void debug_uart_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size)
+void debug_uart_rx_line_callback(const uint8_t *data, uint16_t len, uint8_t type)
 {
-    if (huart->Instance != USART1) {
-        return; // Safety check
+    if (type == DEBUG_UART_TYPE_RADIO) {
+        process_radio_injection(data, len);
+    } else if (type == DEBUG_UART_TYPE_GPS) {
+        process_gps_injection(data, len);
     }
-
-    // Calculate number of bytes received
-    uint16_t bytes_received = Size;
-
-    // Need at least 2 bytes (type + 1 byte payload)
-    if (bytes_received < 2) {
-        return; // Invalid message
-    }
-
-    // Read type byte
-    uint8_t type_byte = debug_uart_rx_buffer[0];
-
-    // Extract payload (everything after type byte)
-    const uint8_t *payload = &debug_uart_rx_buffer[1];
-    uint16_t payload_len = bytes_received - 1;
-
-    // Route based on type byte
-    if (type_byte == DEBUG_UART_TYPE_RADIO) {
-        process_radio_injection(payload, payload_len);
-    } else if (type_byte == DEBUG_UART_TYPE_GPS) {
-        process_gps_injection(payload, payload_len);
-    }
-    // Ignore unknown type bytes
 }
 
 /* ============================================================================

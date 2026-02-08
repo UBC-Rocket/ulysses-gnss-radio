@@ -2,9 +2,9 @@
  * @file debug_uart.h
  * @brief Debug UART interface - bidirectional injection and logging
  *
- * RX (Injection): DMA + IDLE mode with binary protocol for message injection
- *   - 0x52 ('R') → Inject radio message (null-terminated binary)
- *   - 0x47 ('G') → Inject GPS NMEA (standard NMEA format with \r\n)
+ * RX (Injection): Line-based protocol via Character Match on '\n'
+ *   - 'R' prefix → Inject radio message to radio queue
+ *   - 'G' prefix → Inject GPS NMEA to GPS queue
  *
  * TX (Logging): Human-readable printf-style logging of all system events
  *   - Radio messages from UART5
@@ -41,9 +41,6 @@ extern "C" {
 /** Injection type byte for GPS messages (ASCII 'G') */
 #define DEBUG_UART_TYPE_GPS   0x47
 
-/** DMA circular buffer size for RX injection (matches GPS/Radio pattern) */
-#define DEBUG_UART_RX_BUFFER_SIZE 512
-
 /** Maximum pending log messages in queue */
 #define DEBUG_UART_LOG_QUEUE_DEPTH 10
 
@@ -67,21 +64,14 @@ typedef struct {
 } debug_log_queue_t;
 
 /* ============================================================================
- * External Variables
- * ============================================================================ */
-
-/** DMA circular buffer for RX injection (defined in debug_uart.c) */
-extern uint8_t debug_uart_rx_buffer[DEBUG_UART_RX_BUFFER_SIZE];
-
-/* ============================================================================
  * Public API - Initialization
  * ============================================================================ */
 
 /**
  * @brief Initialize debug UART system (injection and logging)
  *
- * Sets up DMA reception for message injection and initializes log queue.
- * Must be called after UART1 peripheral initialization in main().
+ * Initializes log queue and stores queue pointers for injection.
+ * USART1 DMA reception is started by uart_callbacks_init(), not here.
  *
  * @param radio_q Pointer to radio message queue (for injection)
  * @param gps_q Pointer to GPS NMEA queue (for injection)
@@ -93,19 +83,17 @@ void debug_uart_init(radio_message_queue_t *radio_q, gps_sample_queue_t *gps_q);
  * ============================================================================ */
 
 /**
- * @brief Process DMA RX event for message injection
+ * @brief Process a complete line received on UART1 for injection
  *
- * Called from HAL_UARTEx_RxEventCallback when IDLE/HT/TC interrupt occurs.
- * Parses type byte and routes message to appropriate queue.
+ * Called from uart_callbacks.c when Character Match fires on '\n'
+ * and the line has an injection prefix ('R' or 'G').
+ * The prefix byte has already been stripped by the caller.
  *
- * Protocol:
- *   [0x52][payload...] → Inject to radio queue (null-terminated)
- *   [0x47][payload...] → Inject to GPS queue (NMEA format with \r\n)
- *
- * @param huart UART handle (should be huart1)
- * @param Size Number of bytes received in DMA buffer
+ * @param data Line payload (prefix stripped, no newline)
+ * @param len Length of payload
+ * @param type DEBUG_UART_TYPE_RADIO or DEBUG_UART_TYPE_GPS
  */
-void debug_uart_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size);
+void debug_uart_rx_line_callback(const uint8_t *data, uint16_t len, uint8_t type);
 
 /* ============================================================================
  * Public API - Logging (TX)

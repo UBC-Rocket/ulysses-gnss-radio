@@ -13,6 +13,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "spi_slave.h"
+#include "uart_callbacks.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -198,7 +199,13 @@ void DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler(void)
 void USART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART1_IRQn 0 */
-
+  // Character Match on '\n' (HAL doesn't handle CM)
+  if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_CMF) &&
+      __HAL_UART_GET_IT_SOURCE(&huart1, UART_IT_CM))
+  {
+      __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_CMF);
+      uart_cm_handler(&huart1);
+  }
   /* USER CODE END USART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart1);
   /* USER CODE BEGIN USART1_IRQn 1 */
@@ -212,7 +219,13 @@ void USART1_IRQHandler(void)
 void USART3_4_5_6_LPUART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART3_4_5_6_LPUART1_IRQn 0 */
-
+  // Character Match on 0x00 for USART5 Radio (HAL doesn't handle CM)
+  if (__HAL_UART_GET_FLAG(&huart5, UART_FLAG_CMF) &&
+      __HAL_UART_GET_IT_SOURCE(&huart5, UART_IT_CM))
+  {
+      __HAL_UART_CLEAR_FLAG(&huart5, UART_CLEAR_CMF);
+      uart_cm_handler(&huart5);
+  }
   /* USER CODE END USART3_4_5_6_LPUART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart5);
   HAL_UART_IRQHandler(&huart6);
