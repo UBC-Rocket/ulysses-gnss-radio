@@ -254,10 +254,16 @@ static void process_dma_data(uint16_t new_pos)
  */
 static void feed_byte(uint8_t b)
 {
-    /* Feed byte to lwgps parser if in PUSH mode */
+    /* Feed byte to lwgps parser */
+    /* PUSH mode: always needed for parsed fix enqueuing */
+    /* DEBUG PULL mode: needed for debug logging of parsed fix */
+#ifdef DEBUG
+    lwgps_process(&s_lwgps, &b, 1);
+#else
     if (s_protocol_mode == SPI_MODE_PUSH) {
         lwgps_process(&s_lwgps, &b, 1);
     }
+#endif
 
     /* Wait for '$' to start a new sentence */
     if (!s_in_sentence) {
@@ -293,6 +299,9 @@ static void feed_byte(uint8_t b)
 #ifdef DEBUG
                 /* Log NMEA sentence to debug console */
                 debug_uart_log_gps_nmea((const char*)s_line);
+                /* Always log parsed GPS state (shows fields even before valid fix) */
+                populate_gps_fix(&s_parsed_fix, &s_lwgps);
+                debug_uart_log_gps_fix(&s_parsed_fix);
 #endif
             }
         } else if (s_protocol_mode == SPI_MODE_PUSH) {

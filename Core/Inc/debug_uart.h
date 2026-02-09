@@ -30,6 +30,7 @@ extern "C" {
 #include "radio_queue.h"
 #include "gps_nema_queue.h"
 #include "protocol_config.h"
+#include "spi_slave.h"
 
 /* ============================================================================
  * Protocol Constants
@@ -149,6 +150,28 @@ void debug_uart_log_spi_radio_tx(const uint8_t *msg, uint16_t len);
  * Transmits one message per call to avoid blocking too long.
  */
 void debug_uart_process_logs(void);
+
+/**
+ * @brief Log SPI ARM state (idle state after arm)
+ *
+ * Prints SPI register state, DMA configuration, and DMAMUX routing
+ * captured after spi_slave_arm() completes. Use for one-shot dump
+ * after initialization or after each re-arm.
+ *
+ * @param dbg Pointer to debug capture structure
+ */
+void debug_uart_log_spi_arm(const spi_debug_capture_t *dbg);
+
+/**
+ * @brief Log SPI transaction debug data
+ *
+ * Prints ISR capture (command byte, SR, DMA state, tx_buf snapshot),
+ * EXTI capture (end-of-transaction state), and post-arm state.
+ * Call from main loop when a new transaction is detected.
+ *
+ * @param dbg Pointer to debug capture structure
+ */
+void debug_uart_log_spi_txn(const spi_debug_capture_t *dbg);
 
 #ifdef __cplusplus
 }

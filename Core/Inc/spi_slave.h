@@ -99,7 +99,8 @@ typedef struct {
     uint8_t rx_buf[MAX_TRANSACTION_SIZE] __attribute__((aligned(32)));
 
     // ── Queue Pointers ──
-    radio_message_queue_t *radio_queue;
+    radio_message_queue_t *radio_queue;      // RX: messages received from radio UART5
+    radio_message_queue_t *radio_tx_queue;   // TX: messages from SPI master to send over radio
     gps_sample_queue_t *gps_queue;
 
     // ── Statistics & Diagnostics ──
@@ -139,10 +140,11 @@ typedef struct {
  * IMPORTANT: Must call spi_slave_set_protocol_mode() BEFORE this function
  * to configure whether to operate in pull or push mode.
  *
- * @param radio_queue Pointer to radio message queue
+ * @param radio_queue Pointer to radio RX message queue
+ * @param radio_tx_queue Pointer to radio TX message queue (SPI master → radio UART5)
  * @param gps_queue Pointer to GPS sample queue
  */
-void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_queue);
+void spi_slave_init(radio_message_queue_t *radio_queue, radio_message_queue_t *radio_tx_queue, gps_sample_queue_t *gps_queue);
 
 /**
  * @brief Set the protocol mode (pull or push)
@@ -237,5 +239,62 @@ void spi_slave_tick(void);
  * @return true if RX buffer appears to contain real data
  */
 bool spi_slave_rx_has_valid_data(void);
+
+// ============================================================================
+// DEBUG INSTRUMENTATION
+// ============================================================================
+
+#ifdef DEBUG
+
+/**
+ * @brief Debug capture structure for SPI transaction instrumentation
+ *
+ * Captures register state at three critical points:
+ * 1. ARM: After spi_slave_arm() completes (pre-transaction idle state)
+ * 2. ISR: At RXNE ISR entry (command byte received, before processing)
+ * 3. EXTI: At NSS rising edge (transaction complete, before re-arm)
+ *
+ * Key fields for diagnosing TX FIFO offset issues:
+ * - pre_arm_sr: FTLVL bits [12:11] show stale TX FIFO bytes after SPE=0
+ * - arm_tx_cndtr: Should be MAX_TRANSACTION_SIZE-4 after DMA prefetch
+ * - isr_tx_cndtr: Shows how many TX bytes DMA has consumed at ISR entry
+ */
+typedef struct spi_debug_capture {
+    // ARM state (captured in spi_slave_arm())
+    uint32_t arm_count;        // Number of times arm has been called
+    uint32_t pre_arm_sr;       // SPI1->SR right after SPE=0 (FTLVL shows stale TX FIFO)
+    uint32_t arm_sr;           // SPI1->SR after full arm sequence (post-TXDMAEN prefetch)
+    uint32_t arm_cr2;          // SPI1->CR2 after arm
+    uint16_t arm_tx_cndtr;     // TX DMA CNDTR after arm (expect MAX_TRANSACTION_SIZE - 4)
+    uint32_t arm_tx_cmar;      // TX DMA CMAR (should equal &tx_buf[0])
+    uint32_t arm_dmamux0;      // DMAMUX1_Channel0->CCR (RX routing, expect 16)
+    uint32_t arm_dmamux1;      // DMAMUX1_Channel1->CCR (TX routing, expect 17)
+
+    // ISR state (captured in spi_slave_spi1_irq_handler())
+    uint32_t isr_count;        // Number of RXNE ISR fires
+    uint8_t  isr_cmd;          // Command byte received
+    uint32_t isr_sr;           // SPI1->SR at ISR entry
+    uint16_t isr_tx_cndtr;     // TX DMA CNDTR at ISR entry
+    uint8_t  isr_tx_snap[8];   // tx_buf[0..7] at ISR entry
+
+    // EXTI state (captured in spi_slave_nss_exti_handler())
+    uint32_t exti_count;       // Number of NSS rising edges
+    uint32_t exti_sr;          // SPI1->SR at transaction end
+    uint16_t exti_tx_cndtr;    // TX DMA CNDTR at transaction end
+    uint16_t exti_rx_cndtr;    // RX DMA CNDTR at transaction end
+    uint8_t  exti_tx_snap[8];  // tx_buf[0..7] at transaction end
+    uint8_t  exti_rx_snap[8];  // rx_buf[0..7] at transaction end
+} spi_debug_capture_t;
+
+/**
+ * @brief Get pointer to debug capture data
+ *
+ * Returns a pointer to the static debug capture structure.
+ * Fields are updated by ISR/EXTI handlers. Read from main loop
+ * to print diagnostic data after each transaction.
+ */
+const spi_debug_capture_t* spi_slave_get_debug_capture(void);
+
+#endif // DEBUG
 
 #endif // SPI_SLAVE_H

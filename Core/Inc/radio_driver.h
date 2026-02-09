@@ -1,12 +1,12 @@
 /**
  * @file radio_driver.h
- * @brief Radio transceiver driver using DMA + IDLE line detection
+ * @brief Radio transceiver driver using DMA circular + Character Match
  *
  * Provides a simple API for sending and receiving radio messages
  * via UART5. Messages are null-terminated (0x00) on the wire.
  *
- * Uses DMA circular buffer with IDLE/HT/TC interrupts for efficient
- * reception with minimal CPU overhead.
+ * Uses DMA circular buffer with Character Match on 0x00 as the sole
+ * interrupt trigger. DMA never stops — no restart gaps, no data loss.
  */
 
 #ifndef RADIO_DRIVER_H
@@ -92,13 +92,14 @@ uint8_t radio_rx_count(void);
 radio_message_queue_t *radio_get_rx_queue(void);
 
 /* ============================================================================
- * UART Callbacks - Wire these from main.c
+ * UART Callbacks - Wire these from stm32g0xx_it.c / uart_callbacks.c
  * ============================================================================ */
 
 /**
- * @brief DMA RX Event callback (IDLE, Half-Transfer, Transfer-Complete)
+ * @brief Character Match event callback
  *
- * This is the main receive handler. Call from HAL_UARTEx_RxEventCallback.
+ * Called from uart_cm_handler when 0x00 is received on USART5.
+ * Processes new bytes in the circular DMA buffer.
  *
  * @param huart UART handle
  * @param Size Current position in DMA buffer
@@ -106,17 +107,9 @@ radio_message_queue_t *radio_get_rx_queue(void);
 void radio_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size);
 
 /**
- * @brief Restart DMA reception after HAL stops it (IDLE/TC)
- *
- * Call from HAL_UARTEx_RxEventCallback after radio_rx_event_callback.
- * Do NOT call from CM handler (DMA is still running during CM).
- */
-void radio_restart_dma(void);
-
-/**
  * @brief UART error callback
  *
- * Call from HAL_UART_ErrorCallback. Restarts DMA on error.
+ * Call from HAL_UART_ErrorCallback. Restarts circular DMA on error.
  *
  * @param huart UART handle
  */

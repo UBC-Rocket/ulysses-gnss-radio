@@ -4,7 +4,7 @@
  *
  * Routes UART events to appropriate driver modules:
  * - USART1: Debug console (DMA circular + Character Match on '\n')
- * - USART5: Radio transceiver (DMA + IDLE + Character Match on 0x00)
+ * - USART5: Radio transceiver (DMA circular + Character Match on 0x00)
  * - USART6: GPS module (DMA + IDLE, unchanged)
  */
 

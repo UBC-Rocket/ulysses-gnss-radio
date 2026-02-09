@@ -34,6 +34,11 @@ static spi_slave_context_t ctx;
 /** Current protocol mode (set by configuration frame on startup) */
 static spi_protocol_mode_t s_protocol_mode = SPI_MODE_PULL;  // Default to pull mode
 
+#ifdef DEBUG
+/** Debug capture - updated by ISR/EXTI/arm, read from main loop */
+static volatile spi_debug_capture_t s_dbg;
+#endif
+
 // ============================================================================
 // FORWARD DECLARATIONS
 // ============================================================================
@@ -219,8 +224,7 @@ static void spi_peripheral_init(void) {
     // Getting these bits wrong will cause FIFO underruns, missed bytes, or race conditions.
     SPI1->CR2 = (7 << SPI_CR2_DS_Pos)    // DS=0b0111 → 8-bit data frames
               | SPI_CR2_FRXTH             // CRITICAL: FIFO RX threshold = 1 byte (not 2!)
-              | SPI_CR2_RXNEIE            // RXNE interrupt enabled (for command byte)
-              | SPI_CR2_TXDMAEN;          // TX DMA enabled from start
+              | SPI_CR2_RXNEIE;           // RXNE interrupt enabled (for command byte)
     //
     // WHY FRXTH (FIFO RX Threshold)?
     // - STM32G0 SPI has a 4-byte RX FIFO (stores received bytes before reading)
@@ -235,14 +239,13 @@ static void spi_peripheral_init(void) {
     //   the TX buffer before the master clocks out bytes 5-260 (the response region).
     // - This gives us a ~32 µs window (4 dummy bytes × 8 µs/byte @ 1 MHz) to prepare.
     //
-    // WHY TXDMAEN but NOT RXDMAEN initially?
-    // - TX DMA is enabled from the start because the TX buffer is pre-loaded with
-    //   zeros (or response data for push mode) and can stream immediately.
-    // - RX DMA is DELIBERATELY OFF because we need the RXNE interrupt to capture
+    // WHY NO TXDMAEN or RXDMAEN?
+    // - TXDMAEN must not be set before SPE=1, otherwise TXE DMA requests fire while
+    //   the SPI is disabled and consume bytes from tx_buf that get discarded on SPE enable.
+    // - RXDMAEN is deliberately OFF because we need the RXNE interrupt to capture
     //   the first byte. If RXDMAEN were on, the DMA would steal byte 0 before the
     //   ISR could read it, and we'd lose the command byte.
-    // - RXDMAEN is enabled INSIDE the RXNE ISR after reading the command byte,
-    //   handing off bytes 1-260 to DMA for zero CPU overhead.
+    // - Both are enabled at the appropriate time by spi_slave_arm().
 
     // Enable SPI peripheral
     SPI1->CR1 |= SPI_CR1_SPE;
@@ -735,7 +738,10 @@ static uint8_t radio_queue_count(radio_message_queue_t *q) {
  */
 static void spi_slave_arm(void) {
     // ── Step 1: Stop everything ──
-    SPI1->CR1 &= ~SPI_CR1_SPE;  // Disable SPI (flushes FIFOs on re-enable)
+    SPI1->CR1 &= ~SPI_CR1_SPE;
+#ifdef DEBUG
+    s_dbg.pre_arm_sr = SPI1->SR;  // Capture FTLVL[12:11] to detect stale TX FIFO bytes
+#endif
     SPI1->CR2 &= ~(SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN | SPI_CR2_RXNEIE);
 
     // Disable both DMA channels
@@ -745,8 +751,13 @@ static void spi_slave_arm(void) {
     // Clear all DMA flags
     DMA1->IFCR = DMA_IFCR_CGIF1 | DMA_IFCR_CGIF2;
 
-    // Clear SPI error flags
-    spi_clear_errors();
+    // Reset SPI peripheral via RCC to flush TX FIFO
+    // SPE=0 alone does NOT flush the TX FIFO on STM32G0. Stale bytes from
+    // the previous transaction persist and get sent before DMA's fresh data,
+    // causing a byte offset in the response. RCC reset clears all SPI
+    // registers, flushes both TX and RX FIFOs, and clears error flags.
+    RCC->APBRSTR2 |= RCC_APBRSTR2_SPI1RST;
+    RCC->APBRSTR2 &= ~RCC_APBRSTR2_SPI1RST;
 
     // ── Step 2: Reset state ──
     ctx.state = SPI_STATE_IDLE;
@@ -784,19 +795,34 @@ static void spi_slave_arm(void) {
     // stealing byte 0 (the command byte) before we can read it.
     spi_rx_dma_start(&ctx.rx_buf[1], MAX_TRANSACTION_SIZE - 1);
 
-    // ── Step 6: Configure SPI CR2 ──
+    // ── Step 6: Configure SPI CR2 (WITHOUT TXDMAEN) ──
     SPI1->CR2 = (7 << SPI_CR2_DS_Pos)    // 8-bit data frames
               | SPI_CR2_FRXTH            // 1-byte FIFO threshold (trigger RXNE every byte)
-              | SPI_CR2_RXNEIE           // RXNE interrupt for command byte
-              | SPI_CR2_TXDMAEN;         // TX DMA active from start
+              | SPI_CR2_RXNEIE;          // RXNE interrupt for command byte
     // Note: RXDMAEN deliberately OFF - enabled after RXNE ISR reads command byte
-    //
-    // This is the "hybrid" configuration:
-    // - First byte → RXNE interrupt (fast response, command decoding)
-    // - Remaining bytes → DMA (zero CPU overhead, bulk transfer)
+    // Note: TXDMAEN deliberately OFF here - enabled AFTER SPE to prevent premature
+    //       DMA prefetch while SPI is disabled (SPE=0). Setting TXDMAEN before SPE
+    //       causes TXE DMA requests that consume tx_buf bytes into the FIFO, which
+    //       are then discarded when SPE=1 resets the SPI state machine, creating a
+    //       byte offset in the TX stream.
 
     // ── Step 7: Enable SPI ──
     SPI1->CR1 |= SPI_CR1_SPE;
+
+    // ── Step 8: Enable TX DMA ──
+    // Now that SPE=1, TXE reflects real FIFO state. DMA will prefetch bytes
+    // from tx_buf[0] into the TX FIFO correctly.
+    SPI1->CR2 |= SPI_CR2_TXDMAEN;
+
+#ifdef DEBUG
+    s_dbg.arm_count++;
+    s_dbg.arm_sr = SPI1->SR;
+    s_dbg.arm_cr2 = SPI1->CR2;
+    s_dbg.arm_tx_cndtr = DMA1_Channel2->CNDTR;
+    s_dbg.arm_tx_cmar = DMA1_Channel2->CMAR;
+    s_dbg.arm_dmamux0 = DMAMUX1_Channel0->CCR;
+    s_dbg.arm_dmamux1 = DMAMUX1_Channel1->CCR;
+#endif
 }
 
 /**
@@ -841,8 +867,9 @@ static void spi_slave_arm_push(void) {
     // Clear all DMA flags
     DMA1->IFCR = DMA_IFCR_CGIF1 | DMA_IFCR_CGIF2;
 
-    // Clear SPI error flags and drain FIFO
-    spi_clear_errors();
+    // Reset SPI peripheral via RCC to flush TX FIFO (see spi_slave_arm)
+    RCC->APBRSTR2 |= RCC_APBRSTR2_SPI1RST;
+    RCC->APBRSTR2 &= ~RCC_APBRSTR2_SPI1RST;
 
     // ── Step 2: Clear RX buffer ──
     // Zero the RX buffer so we can detect if master sent real data vs dummy bytes.
@@ -894,16 +921,17 @@ static void spi_slave_arm_push(void) {
     // - TX DMA can start streaming immediately when master clocks SCK
     // - RX DMA can capture master data simultaneously
     // - No need for the hybrid RXNE + DMA handoff
+    // ── Step 5: Configure SPI CR2 (WITHOUT DMA enables) ──
     SPI1->CR2 = (7 << SPI_CR2_DS_Pos)    // 8-bit data frames
-              | SPI_CR2_FRXTH            // 1-byte FIFO threshold
-              | SPI_CR2_TXDMAEN          // TX DMA enabled from start
-              | SPI_CR2_RXDMAEN;         // RX DMA enabled from start (not delayed like pull mode)
+              | SPI_CR2_FRXTH;            // 1-byte FIFO threshold
 
     // ── Step 6: Enable SPI ──
-    // With TXDMAEN already set, the TX FIFO will immediately prefetch up to 4 bytes
-    // from tx_buf via DMA. When master asserts NSS and starts clocking SCK, those
-    // bytes are already loaded and ready to transmit with zero latency.
     SPI1->CR1 |= SPI_CR1_SPE;
+
+    // ── Step 6b: Enable DMA after SPE ──
+    // TXDMAEN and RXDMAEN must be set AFTER SPE=1 to prevent premature
+    // DMA transfers while SPI is disabled. See spi_slave_arm() for details.
+    SPI1->CR2 |= SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN;
 
     // ── Step 7: Update state ──
     // HAVE_DATA state indicates:
@@ -962,8 +990,8 @@ static void spi_slave_arm_push(void) {
 static void spi_slave_arm_push_idle(void) {
     // ── Step 1: Stop Everything ──
     // Disable SPI and all DMA activity to safely reconfigure
-    SPI1->CR1 &= ~SPI_CR1_SPE;  // Disable SPI (flushes FIFOs)
-    SPI1->CR2 &= ~(SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN | SPI_CR2_RXNEIE);  // Disable all interrupts/DMA
+    SPI1->CR1 &= ~SPI_CR1_SPE;
+    SPI1->CR2 &= ~(SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN | SPI_CR2_RXNEIE);
 
     // Disable both DMA channels
     DMA1_Channel1->CCR &= ~DMA_CCR_EN;  // RX DMA off
@@ -972,8 +1000,9 @@ static void spi_slave_arm_push_idle(void) {
     // Clear all DMA interrupt flags for both channels
     DMA1->IFCR = DMA_IFCR_CGIF1 | DMA_IFCR_CGIF2;
 
-    // Clear SPI error flags and drain FIFO
-    spi_clear_errors();
+    // Reset SPI peripheral via RCC to flush TX FIFO (see spi_slave_arm)
+    RCC->APBRSTR2 |= RCC_APBRSTR2_SPI1RST;
+    RCC->APBRSTR2 &= ~RCC_APBRSTR2_SPI1RST;
 
     // ── Step 2: Reset State ──
     ctx.state = SPI_STATE_IDLE;  // Ready for new transaction
@@ -1026,8 +1055,9 @@ static void spi_slave_arm_config(void) {
     // Clear all DMA flags
     DMA1->IFCR = DMA_IFCR_CGIF1 | DMA_IFCR_CGIF2;
 
-    // Clear SPI error flags
-    spi_clear_errors();
+    // Reset SPI peripheral via RCC to flush TX FIFO (see spi_slave_arm)
+    RCC->APBRSTR2 |= RCC_APBRSTR2_SPI1RST;
+    RCC->APBRSTR2 &= ~RCC_APBRSTR2_SPI1RST;
 
     // ── Step 2: Set state ──
     ctx.state = SPI_STATE_UNCONFIGURED;
@@ -1163,6 +1193,14 @@ void spi_slave_spi1_irq_handler(void) {
         ctx.current_cmd = cmd;
         ctx.rx_buf[0] = cmd;  // Save command for later processing
 
+#ifdef DEBUG
+        s_dbg.isr_count++;
+        s_dbg.isr_cmd = cmd;
+        s_dbg.isr_sr = SPI1->SR;
+        s_dbg.isr_tx_cndtr = DMA1_Channel2->CNDTR;
+        memcpy((void*)s_dbg.isr_tx_snap, ctx.tx_buf, 8);
+#endif
+
         // ── Disable RXNE interrupt ──
         // We got the command byte. We don't want RXNE firing for every subsequent byte
         // (that would be 260 more interrupts!). DMA will handle the rest silently.
@@ -1258,8 +1296,8 @@ void spi_slave_dma1_ch1_irq_handler(void) {
         if (ctx.current_cmd == CMD_RADIO_TX && !ctx.payload_processed) {
             // Payload is at rx_buf[CMD_OVERHEAD..CMD_OVERHEAD+255]
             // (byte 0 is cmd from RXNE ISR, bytes 1-4 are dummy, bytes 5-260 are payload)
-            if (ctx.radio_queue) {
-                radio_message_enqueue(256, &ctx.rx_buf[CMD_OVERHEAD], ctx.radio_queue);
+            if (ctx.radio_tx_queue) {
+                radio_message_enqueue(256, &ctx.rx_buf[CMD_OVERHEAD], ctx.radio_tx_queue);
 #ifdef DEBUG
                 /* Log SPI radio TX to debug console */
                 debug_uart_log_spi_radio_tx(&ctx.rx_buf[CMD_OVERHEAD], 256);
@@ -1369,6 +1407,15 @@ void spi_slave_nss_exti_handler(void) {
         // Safe to assert IRQ again for push mode.
         ctx.nss_busy = false;
         ctx.nss_rising_events++;
+
+#ifdef DEBUG
+        s_dbg.exti_count++;
+        s_dbg.exti_sr = SPI1->SR;
+        s_dbg.exti_tx_cndtr = DMA1_Channel2->CNDTR;
+        s_dbg.exti_rx_cndtr = DMA1_Channel1->CNDTR;
+        memcpy((void*)s_dbg.exti_tx_snap, ctx.tx_buf, 8);
+        memcpy((void*)s_dbg.exti_rx_snap, ctx.rx_buf, 8);
+#endif
 
         // ── Handle based on state ──
         switch (ctx.state) {
@@ -1545,14 +1592,17 @@ void spi_slave_nss_exti_handler(void) {
                 // If we received at least a full radio message (256 bytes) AND it's not dummy data...
                 if (rx_received >= PUSH_RADIO_PAYLOAD && spi_slave_rx_has_valid_data()) {
                     // Master sent a radio TX message simultaneously!
-                    // Enqueue the payload (first 256 bytes of rx_buf) to the radio queue.
+                    // Enqueue the payload (first 256 bytes of rx_buf) to the radio TX queue.
                     //
                     // WHY first 256 bytes?
                     // - In push mode, master doesn't send CMD + DUMMY bytes like in pull mode
                     // - Master just sends the raw 256-byte radio payload
                     // - rx_buf[0..255] contains the radio message directly
-                    if (ctx.radio_queue) {
-                        radio_message_enqueue(PUSH_RADIO_PAYLOAD, ctx.rx_buf, ctx.radio_queue);
+                    if (ctx.radio_tx_queue) {
+                        radio_message_enqueue(PUSH_RADIO_PAYLOAD, ctx.rx_buf, ctx.radio_tx_queue);
+#ifdef DEBUG
+                        debug_uart_log_spi_radio_tx(ctx.rx_buf, PUSH_RADIO_PAYLOAD);
+#endif
                         ctx.master_tx_received++;  // Diagnostic counter
                     }
                 }
@@ -1627,8 +1677,8 @@ void spi_slave_nss_exti_handler(void) {
                     // - If DMA TC fired before NSS EXTI, payload_processed = true
                     // - This if-block would be skipped, preventing double-enqueue
                     // - If NSS EXTI fires first (short transaction), we process it here
-                    if (ctx.radio_queue) {
-                        radio_message_enqueue(256, &ctx.rx_buf[CMD_OVERHEAD], ctx.radio_queue);
+                    if (ctx.radio_tx_queue) {
+                        radio_message_enqueue(256, &ctx.rx_buf[CMD_OVERHEAD], ctx.radio_tx_queue);
 #ifdef DEBUG
                         // Log to debug UART if in Debug build
                         debug_uart_log_spi_radio_tx(&ctx.rx_buf[CMD_OVERHEAD], 256);
@@ -1652,22 +1702,34 @@ void spi_slave_nss_exti_handler(void) {
             }
 
             // ── Handle Read Commands ──
-            // For read commands (CMD_RADIO_RX_LIFO, CMD_RADIO_RX_FIFO, CMD_GPS_RX), we already
-            // sent data to master via TX DMA. Now we pop the message from the queue since it was read.
+            // For read commands, we already sent data to master via TX DMA.
+            // Now pop the message from the queue since master has received it.
             //
             // WHY pop in EXTI handler (not in RXNE ISR or DMA TC)?
             // - RXNE ISR: Too early - transaction hasn't completed, master might abort
             // - DMA TC: Fires when DMA finishes (260 bytes), but master might have ended early
             // - NSS EXTI: Fires when master releases NSS (authoritative transaction end)
             //
-            // TODO: Add pop logic for read commands (currently handled implicitly by queue peeking)
-            // Example:
-            // if (ctx.current_cmd == CMD_RADIO_RX_LIFO || ctx.current_cmd == CMD_RADIO_RX_FIFO) {
-            //     radio_message_queue_pop(ctx.radio_queue);
-            // }
-            // if (ctx.current_cmd == CMD_GPS_RX) {
-            //     gps_sample_queue_pop(ctx.gps_queue);
-            // }
+            // We verify the full payload was transmitted before popping. If the
+            // master ended early, the message stays in the queue for retry.
+            {
+                uint16_t tx_remaining = DMA1_Channel2->CNDTR;
+                uint16_t tx_sent = MAX_TRANSACTION_SIZE - tx_remaining;
+
+                if (ctx.current_cmd == CMD_RADIO_RX_FIFO) {
+                    if (tx_sent >= PULL_RADIO_TOTAL && ctx.radio_queue) {
+                        radio_message_queue_pop(ctx.radio_queue);
+                    }
+                } else if (ctx.current_cmd == CMD_RADIO_RX_LIFO) {
+                    if (tx_sent >= PULL_RADIO_TOTAL && ctx.radio_queue) {
+                        radio_message_queue_pop_lifo(ctx.radio_queue);
+                    }
+                } else if (ctx.current_cmd == CMD_GPS_RX) {
+                    if (tx_sent >= PULL_GPS_TOTAL && ctx.gps_queue) {
+                        gps_sample_queue_pop(ctx.gps_queue);
+                    }
+                }
+            }
 
             // ── Check for SPI Overrun Errors ──
             // OVR (Overrun) flag is set when:
@@ -1741,12 +1803,13 @@ void spi_slave_nss_exti_handler(void) {
  * and arms for operation based on the protocol mode set by
  * spi_slave_set_protocol_mode().
  */
-void spi_slave_init(radio_message_queue_t *radio_queue, gps_sample_queue_t *gps_queue) {
+void spi_slave_init(radio_message_queue_t *radio_queue, radio_message_queue_t *radio_tx_queue, gps_sample_queue_t *gps_queue) {
     // Clear context structure
     memset(&ctx, 0, sizeof(ctx));
 
     // Store queue pointers
     ctx.radio_queue = radio_queue;
+    ctx.radio_tx_queue = radio_tx_queue;
     ctx.gps_queue = gps_queue;
 
     // ── Enable peripheral clocks ──
@@ -1806,6 +1869,12 @@ void spi_slave_reset_errors(void) {
     ctx.unknown_commands = 0;
     ctx.master_tx_received = 0;
 }
+
+#ifdef DEBUG
+const spi_debug_capture_t* spi_slave_get_debug_capture(void) {
+    return (const spi_debug_capture_t*)&s_dbg;
+}
+#endif
 
 /**
  * @brief Set the protocol mode (pull or push)
@@ -2018,6 +2087,15 @@ bool spi_slave_rx_has_valid_data(void) {
  * - If both queues have data, push GPS first, then radio on next tick
  */
 void spi_slave_tick(void) {
+    // ── Guard: Only operate in PUSH mode ──
+    // In PULL mode, the master initiates all transactions via commands.
+    // Calling prepare_push() in PULL mode would override the pull-mode arm
+    // configuration (disabling RXNEIE, enabling TXDMAEN/RXDMAEN), causing
+    // the slave to send push data instead of responding to pull commands.
+    if (s_protocol_mode != SPI_MODE_PUSH) {
+        return;
+    }
+
     // ── Guard: Only Process if Idle ──
     // If we're mid-transaction (ACTIVE, HAVE_DATA, or UNCONFIGURED), don't start a new push.
     // Starting a push while a transaction is active would:

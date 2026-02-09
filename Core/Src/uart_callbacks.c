@@ -4,7 +4,7 @@
  *
  * Routes UART events to appropriate driver modules:
  * - USART1: Debug console (DMA circular + Character Match on '\n')
- * - USART5: Radio transceiver (DMA + IDLE + Character Match on 0x00)
+ * - USART5: Radio transceiver (DMA circular + Character Match on 0x00)
  * - USART6: GPS module (DMA + IDLE, unchanged)
  *
  * Character Match (CM) provides deterministic message framing:
@@ -109,6 +109,9 @@ void uart_cm_handler(UART_HandleTypeDef *huart)
             line_len--;
         }
 
+        /* Null-terminate so downstream %s doesn't read stale data */
+        uart1_line_buf[line_len] = '\0';
+
         if (line_len > 0)
         {
             uart1_line_received(uart1_line_buf, line_len);
@@ -167,12 +170,8 @@ static void uart1_line_received(const uint8_t *line, uint16_t len)
 /**
  * @brief DMA RX Event callback for IDLE/HT/TC events
  *
- * IDLE events serve as a safety net for USART5 (radio). The primary trigger
- * is Character Match (handled in uart_cm_handler), but IDLE catches any
- * remaining data. process_dma_data's s_last_pos tracking prevents
- * double-processing.
- *
- * USART6 (GPS) uses IDLE as its primary trigger (unchanged).
+ * USART6 (GPS) uses IDLE as its primary trigger.
+ * USART1 and USART5 use Character Match only (handled in uart_cm_handler).
  */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
@@ -181,14 +180,6 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         /* GPS DMA event (IDLE, Half-Transfer, or Transfer-Complete) */
         gps_rx_event_callback(huart, Size);
     }
-    else if (huart->Instance == USART5)
-    {
-        /* Radio DMA event (IDLE safety net - CM is primary trigger).
-         * HAL stops Normal-mode DMA after this callback, so restart. */
-        radio_rx_event_callback(huart, Size);
-        radio_restart_dma();
-    }
-    /* USART1: CM is the only trigger we care about, ignore IDLE/HT/TC */
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)

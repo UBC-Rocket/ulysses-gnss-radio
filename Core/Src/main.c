@@ -55,6 +55,7 @@ DMA_HandleTypeDef hdma_usart6_rx;
 
 /* USER CODE BEGIN PV */
 static radio_message_queue_t radio_rx_queue;
+static radio_message_queue_t radio_tx_queue;
 static gps_sample_queue_t gps_sample_queue;
 /* USER CODE END PV */
 
@@ -121,6 +122,9 @@ int main(void)
 
   // Initialize radio driver (handles its own queue initialization)
   radio_init(&radio_rx_queue);
+
+  // Initialize radio TX queue (SPI master → radio UART5)
+  radio_message_queue_init(&radio_tx_queue);
   // Start USART1 DMA reception + Character Match on '\n'
 #ifdef DEBUG
   // Initialize debug UART system (injection + logging)
@@ -161,9 +165,16 @@ int main(void)
 #endif
   }
 
-  // Initialize SPI slave (uses radio queue and GPS queue)
-  spi_slave_init(&radio_rx_queue, &gps_sample_queue);
+  // Initialize SPI slave (uses radio RX, radio TX, and GPS queues)
+  spi_slave_init(&radio_rx_queue, &radio_tx_queue, &gps_sample_queue);
 
+#ifdef DEBUG
+  // One-shot SPI state dump after initialization
+  {
+      const spi_debug_capture_t *spi_dbg = spi_slave_get_debug_capture();
+      debug_uart_log_spi_arm(spi_dbg);
+  }
+#endif
 
   /* USER CODE END 2 */
 
@@ -181,22 +192,35 @@ int main(void)
       // Push mode tick - check for pending data and assert IRQ if needed
       spi_slave_tick();
 
-#ifdef DEBUG
-      // Process and transmit pending debug log messages
-      debug_uart_process_logs();
+      // Transmit radio messages from SPI master over UART5
+      if (!radio_message_queue_empty(&radio_tx_queue)) {
+          uint8_t tx_msg[RADIO_MESSAGE_MAX_LEN];
+          radio_message_dequeue(&radio_tx_queue, tx_msg);
 
-      // Check if radio message received (for debug output)
-      if (radio_available()) {
-          uint8_t msg[RADIO_MAX_MESSAGE_LEN];
-          uint8_t len = radio_read(msg);
-          
-          if (len > 0) {
-              // Output to ST-Link UART (UART1) for debugging
-              HAL_UART_Transmit(&huart1, (uint8_t*)"RX: ", 4, 100);
-              HAL_UART_Transmit(&huart1, msg, len, 100);
-              HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, 100);
+          // Find actual message length (null-padded to 256)
+          uint8_t tx_len = 0;
+          while (tx_len < RADIO_MESSAGE_MAX_LEN && tx_msg[tx_len] != 0) {
+              tx_len++;
+          }
+
+          if (tx_len > 0) {
+              radio_send(tx_msg, tx_len);
           }
       }
+
+#ifdef DEBUG
+      // Log SPI transaction debug data when new transaction detected
+      {
+          static uint32_t last_spi_exti = 0;
+          const spi_debug_capture_t *spi_dbg = spi_slave_get_debug_capture();
+          if (spi_dbg->exti_count != last_spi_exti) {
+              last_spi_exti = spi_dbg->exti_count;
+              debug_uart_log_spi_txn(spi_dbg);
+          }
+      }
+
+      // Process and transmit pending debug log messages
+      debug_uart_process_logs();
 #endif
       
       HAL_Delay(1);  // Reduced delay for faster push response
@@ -389,7 +413,7 @@ static void MX_USART6_UART_Init(void)
 
   /* USER CODE END USART6_Init 1 */
   huart6.Instance = USART6;
-  huart6.Init.BaudRate = 115200;
+  huart6.Init.BaudRate = 9600;
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;

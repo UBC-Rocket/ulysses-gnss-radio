@@ -82,3 +82,9 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# Debug builds: enable float printf support for debug logging (adds ~4KB flash)
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+    $<$<CONFIG:Debug>:-u>
+    $<$<CONFIG:Debug>:_printf_float>
+)

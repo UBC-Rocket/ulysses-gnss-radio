@@ -117,10 +117,10 @@ void spi_test_print_queues(radio_message_queue_t *radio_q, gps_sample_queue_t *g
         (radio_q->head - radio_q->tail + RADIO_MESSAGE_QUEUE_LEN) % RADIO_MESSAGE_QUEUE_LEN;
     printf("  Radio Queue: %u/%u messages\n", radio_count, RADIO_MESSAGE_QUEUE_LEN);
 
-    // GPS queue
-    uint8_t gps_count = gps_sample_queue_empty(gps_q) ? 0 :
-        (gps_q->head - gps_q->tail + GPS_SAMPLE_QUEUE_LEN) % GPS_SAMPLE_QUEUE_LEN;
-    printf("  GPS Queue: %u/%u samples\n", gps_count, GPS_SAMPLE_QUEUE_LEN);
+    // GPS double buffer
+    uint8_t gps_count = gps_sample_queue_empty(gps_q) ? 0 : 1;
+    printf("  GPS Buffer: %s (active slot %u)\n",
+           gps_count ? "has data" : "empty", gps_q->active);
 
     printf("====================\n\n");
 }

@@ -9,6 +9,8 @@
 #ifdef DEBUG
 
 #include "debug_uart.h"
+#include "spi_slave.h"
+#include "lwgps/lwgps.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -33,6 +35,9 @@ static radio_message_queue_t *radio_queue = NULL;
 /** GPS NMEA queue pointer (for injection) */
 static gps_sample_queue_t *gps_queue = NULL;
 
+/** lwgps parser instance for injection parsing */
+static lwgps_t s_debug_lwgps;
+
 /* ============================================================================
  * Internal Function Prototypes
  * ============================================================================ */
@@ -55,6 +60,8 @@ void debug_uart_init(radio_message_queue_t *radio_q, gps_sample_queue_t *gps_q)
 
     log_queue.head = 0;
     log_queue.tail = 0;
+
+    lwgps_init(&s_debug_lwgps);
     /* USART1 DMA reception is started by uart_callbacks_init() */
 }
 
@@ -101,12 +108,26 @@ void debug_uart_log_gps_fix(const gps_fix_t *fix)
         return;
     }
 
-    log_enqueue("[GPS FIX] Lat: %.6f, Lon: %.6f, Alt: %.1fm, Speed: %.1fm/s, Sats: %u\r\n",
-                fix->latitude,
-                fix->longitude,
-                fix->altitude_msl,
-                fix->ground_speed,
-                fix->num_satellites);
+    const char *q_str;
+    switch (fix->fix_quality) {
+        case 0:  q_str = "No Fix"; break;
+        case 1:  q_str = "GPS";    break;
+        case 2:  q_str = "DGPS";   break;
+        case 3:  q_str = "PPS";    break;
+        default: q_str = "?";      break;
+    }
+
+    uint8_t hrs = (uint8_t)(fix->time_of_week_ms / 3600000u);
+    uint8_t min = (uint8_t)((fix->time_of_week_ms % 3600000u) / 60000u);
+    uint8_t sec = (uint8_t)((fix->time_of_week_ms % 60000u) / 1000u);
+
+    log_enqueue("[GPS FIX] Fix: %u (%s) | Sats: %u | HDOP: %.1f\r\n"
+                "          Lat: %.6f | Lon: %.6f | Alt: %.1fm\r\n"
+                "          Spd: %.1fm/s | Crs: %.1f | Time: %02u:%02u:%02u UTC\r\n",
+                fix->fix_quality, q_str, fix->num_satellites, (double)fix->hdop,
+                fix->latitude, fix->longitude, (double)fix->altitude_msl,
+                (double)fix->ground_speed, (double)fix->course,
+                hrs, min, sec);
 }
 
 void debug_uart_log_spi_radio_tx(const uint8_t *msg, uint16_t len)
@@ -175,6 +196,9 @@ static void process_radio_injection(const uint8_t *payload, uint16_t len)
 
     // Enqueue to radio RX queue
     radio_message_enqueue(msg_len, msg_buffer, radio_queue);
+
+    // Log the injected message
+    debug_uart_log_radio(msg_buffer, msg_len);
 }
 
 static void process_gps_injection(const uint8_t *payload, uint16_t len)
@@ -188,18 +212,42 @@ static void process_gps_injection(const uint8_t *payload, uint16_t len)
         return; // Invalid NMEA
     }
 
-    // Validate length (max 82 chars per NMEA spec)
-    if (len > 82) {
+    // Validate length (max 82 chars per NMEA spec, need room for \r\n)
+    if (len > 80 || (len + 2) > GPS_SAMPLE_SIZE) {
         return; // Too long
     }
 
-    // Create buffer and pad to GPS_SAMPLE_SIZE
+    // Create buffer, copy payload, append \r\n as per NMEA spec
+    // (CM handler strips \r\n, but upstream parser needs the delimiters)
     uint8_t gps_buffer[GPS_SAMPLE_SIZE];
     memset(gps_buffer, 0, GPS_SAMPLE_SIZE);
     memcpy(gps_buffer, payload, len);
+    gps_buffer[len] = '\r';
+    gps_buffer[len + 1] = '\n';
 
     // Enqueue to GPS NMEA queue
     gps_sample_enqueue(gps_buffer, gps_queue);
+
+    // Log the injected GPS sentence
+    debug_uart_log_gps_nmea((const char *)payload);
+
+    // Parse the injected NMEA with lwgps and log the result
+    lwgps_process(&s_debug_lwgps, gps_buffer, len + 2);
+
+    gps_fix_t injected_fix;
+    memset(&injected_fix, 0, sizeof(injected_fix));
+    injected_fix.latitude      = s_debug_lwgps.latitude;
+    injected_fix.longitude     = s_debug_lwgps.longitude;
+    injected_fix.altitude_msl  = s_debug_lwgps.altitude;
+    injected_fix.ground_speed  = s_debug_lwgps.speed * 0.514444f;
+    injected_fix.course        = s_debug_lwgps.course;
+    injected_fix.fix_quality   = (uint8_t)s_debug_lwgps.fix;
+    injected_fix.num_satellites = s_debug_lwgps.sats_in_use;
+    injected_fix.hdop          = s_debug_lwgps.dop_h;
+    injected_fix.time_of_week_ms = ((uint32_t)s_debug_lwgps.hours * 3600u +
+                                     (uint32_t)s_debug_lwgps.minutes * 60u +
+                                     (uint32_t)s_debug_lwgps.seconds) * 1000u;
+    debug_uart_log_gps_fix(&injected_fix);
 }
 
 /* ============================================================================
@@ -275,6 +323,69 @@ static void format_hex_ascii(char *out, size_t out_size, const uint8_t *data, ui
     }
 
     snprintf(&out[pos], out_size - pos, ")");
+}
+
+/* ============================================================================
+ * Public API - SPI Debug Logging
+ * ============================================================================ */
+
+void debug_uart_log_spi_arm(const spi_debug_capture_t *dbg)
+{
+    if (dbg == NULL) return;
+
+    log_enqueue("[SPI ARM#%lu] pre_SR=%04lX post_SR=%04lX CR2=%04lX\r\n"
+                "  TXCN=%u CMAR=%08lX DMX=%02lX/%02lX\r\n",
+                (unsigned long)dbg->arm_count,
+                (unsigned long)dbg->pre_arm_sr,
+                (unsigned long)dbg->arm_sr,
+                (unsigned long)dbg->arm_cr2,
+                (unsigned)dbg->arm_tx_cndtr,
+                (unsigned long)dbg->arm_tx_cmar,
+                (unsigned long)dbg->arm_dmamux0,
+                (unsigned long)dbg->arm_dmamux1);
+}
+
+void debug_uart_log_spi_txn(const spi_debug_capture_t *dbg)
+{
+    if (dbg == NULL) return;
+
+    log_enqueue("[SPI ISR#%lu] cmd=%02X SR=%04lX TXCN=%u\r\n"
+                "  tx: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                (unsigned long)dbg->isr_count,
+                (unsigned)dbg->isr_cmd,
+                (unsigned long)dbg->isr_sr,
+                (unsigned)dbg->isr_tx_cndtr,
+                dbg->isr_tx_snap[0], dbg->isr_tx_snap[1],
+                dbg->isr_tx_snap[2], dbg->isr_tx_snap[3],
+                dbg->isr_tx_snap[4], dbg->isr_tx_snap[5],
+                dbg->isr_tx_snap[6], dbg->isr_tx_snap[7]);
+
+    log_enqueue("[SPI EXTI#%lu] SR=%04lX TXCN=%u RXCN=%u\r\n"
+                "  tx: %02X %02X %02X %02X %02X %02X %02X %02X\r\n"
+                "  rx: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                (unsigned long)dbg->exti_count,
+                (unsigned long)dbg->exti_sr,
+                (unsigned)dbg->exti_tx_cndtr,
+                (unsigned)dbg->exti_rx_cndtr,
+                dbg->exti_tx_snap[0], dbg->exti_tx_snap[1],
+                dbg->exti_tx_snap[2], dbg->exti_tx_snap[3],
+                dbg->exti_tx_snap[4], dbg->exti_tx_snap[5],
+                dbg->exti_tx_snap[6], dbg->exti_tx_snap[7],
+                dbg->exti_rx_snap[0], dbg->exti_rx_snap[1],
+                dbg->exti_rx_snap[2], dbg->exti_rx_snap[3],
+                dbg->exti_rx_snap[4], dbg->exti_rx_snap[5],
+                dbg->exti_rx_snap[6], dbg->exti_rx_snap[7]);
+
+    log_enqueue("[SPI ARM#%lu] pre_SR=%04lX post_SR=%04lX CR2=%04lX\r\n"
+                "  TXCN=%u CMAR=%08lX DMX=%02lX/%02lX\r\n",
+                (unsigned long)dbg->arm_count,
+                (unsigned long)dbg->pre_arm_sr,
+                (unsigned long)dbg->arm_sr,
+                (unsigned long)dbg->arm_cr2,
+                (unsigned)dbg->arm_tx_cndtr,
+                (unsigned long)dbg->arm_tx_cmar,
+                (unsigned long)dbg->arm_dmamux0,
+                (unsigned long)dbg->arm_dmamux1);
 }
 
 #endif // DEBUG

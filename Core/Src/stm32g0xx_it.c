@@ -148,7 +148,7 @@ void SysTick_Handler(void)
 void DMA1_Channel1_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel1_IRQn 0 */
-  // SPI2 RX DMA handler (for SPI slave) - we handle DMA ourselves
+  // SPI1 RX DMA handler (for SPI slave) - we handle DMA ourselves
   spi_slave_dma1_ch1_irq_handler();
   return;  // Skip HAL handler - we use register-level DMA
   /* USER CODE END DMA1_Channel1_IRQn 0 */
@@ -164,7 +164,7 @@ void DMA1_Channel1_IRQHandler(void)
 void DMA1_Channel2_3_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel2_3_IRQn 0 */
-  // SPI2 TX DMA uses channel 2 - we handle DMA ourselves
+  // SPI1 TX DMA uses channel 2 - we handle DMA ourselves
   // (we don't care about TX completion - NSS rising edge handles transaction end)
   return;  // Skip HAL handler - we use register-level DMA
   /* USER CODE END DMA1_Channel2_3_IRQn 0 */
