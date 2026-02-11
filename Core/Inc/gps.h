@@ -2,10 +2,11 @@
 
 /**
  * @file gps.h
- * @brief GPS Driver using DMA + IDLE line detection
+ * @brief GPS Driver using DMA circular + Character Match on '\n'
  *
  * Efficient NMEA sentence reception with minimal CPU overhead.
- * Uses DMA circular buffer with IDLE/HT/TC interrupts instead of per-byte.
+ * Uses DMA circular buffer with Character Match interrupt on '\n'.
+ * Matches the CM pattern used by USART1 and USART5.
  */
 
 #include "stm32g0xx_hal.h"
@@ -44,9 +45,9 @@ void gps_set_fix_queue(gps_fix_queue_t *queue);
 void gps_set_protocol_mode(spi_protocol_mode_t mode);
 
 /**
- * @brief Initialize GPS driver with DMA reception
+ * @brief Initialize GPS driver with DMA circular + CM reception
  *
- * Starts DMA circular receive with IDLE line detection.
+ * Configures Character Match on '\n' and starts DMA circular receive.
  * Call after HAL peripheral initialization.
  *
  * @param gps_uart UART handle for GPS module (e.g., UART6)
@@ -67,9 +68,9 @@ void gps_process(void);
  * ============================================================================ */
 
 /**
- * @brief DMA RX Event callback (IDLE, Half-Transfer, Transfer-Complete)
+ * @brief Character Match RX callback (called on '\n')
  *
- * This is the main receive handler. Call from HAL_UARTEx_RxEventCallback.
+ * This is the main receive handler. Called from uart_cm_handler().
  *
  * @param huart UART handle
  * @param Size Current position in DMA buffer

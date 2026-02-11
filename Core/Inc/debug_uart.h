@@ -43,7 +43,7 @@ extern "C" {
 #define DEBUG_UART_TYPE_GPS   0x47
 
 /** Maximum pending log messages in queue */
-#define DEBUG_UART_LOG_QUEUE_DEPTH 10
+#define DEBUG_UART_LOG_QUEUE_DEPTH 20
 
 /** Maximum characters per log message */
 #define DEBUG_UART_LOG_MSG_SIZE 256
@@ -141,6 +141,38 @@ void debug_uart_log_gps_fix(const gps_fix_t *fix);
  * @param len Length of message in bytes
  */
 void debug_uart_log_spi_radio_tx(const uint8_t *msg, uint16_t len);
+
+/**
+ * @brief Log successful radio message read by SPI master
+ *
+ * Formats and enqueues message: "[SPI->M] Radio: <hex> (<ASCII>)"
+ * Called from spi_slave.c when radio data is dequeued and sent to master.
+ *
+ * @param msg Pointer to radio message bytes
+ * @param len Length of message in bytes
+ */
+void debug_uart_log_spi_radio_read(const uint8_t *msg, uint16_t len);
+
+/**
+ * @brief Log successful GPS data read by SPI master
+ *
+ * Formats and enqueues message: "[SPI->M] GPS: <data>"
+ * Called from spi_slave.c when GPS data is dequeued and sent to master.
+ *
+ * @param data Pointer to GPS data bytes (NMEA sentence or fix struct)
+ * @param len Length of data in bytes
+ */
+void debug_uart_log_spi_gps_read(const uint8_t *data, uint16_t len);
+
+/**
+ * @brief Log radio buffer length response sent to SPI master
+ *
+ * Formats and enqueues message: "[SPI->M] BufLen: <count>"
+ * Called from spi_slave.c when CMD_RADIO_RXBUF_LEN is processed.
+ *
+ * @param count Number of messages in radio buffer
+ */
+void debug_uart_log_spi_buflen(uint8_t count);
 
 /**
  * @brief Process and transmit pending log messages

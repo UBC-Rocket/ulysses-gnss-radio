@@ -141,6 +141,32 @@ void debug_uart_log_spi_radio_tx(const uint8_t *msg, uint16_t len)
     log_enqueue("[SPI TX] Radio msg from master: %s\r\n", hex_ascii);
 }
 
+void debug_uart_log_spi_radio_read(const uint8_t *msg, uint16_t len)
+{
+    if (msg == NULL || len == 0) {
+        return;
+    }
+
+    char hex_ascii[128];
+    format_hex_ascii(hex_ascii, sizeof(hex_ascii), msg, len);
+    log_enqueue("[SPI->M] Radio: %s\r\n", hex_ascii);
+}
+
+void debug_uart_log_spi_gps_read(const uint8_t *data, uint16_t len)
+{
+    if (data == NULL || len == 0) {
+        return;
+    }
+
+    // Print as string (NMEA sentences are ASCII)
+    log_enqueue("[SPI->M] GPS: %.*s\r\n", (int)len, (const char *)data);
+}
+
+void debug_uart_log_spi_buflen(uint8_t count)
+{
+    log_enqueue("[SPI->M] BufLen: %u\r\n", count);
+}
+
 void debug_uart_process_logs(void)
 {
     // Process one message per call to avoid blocking too long

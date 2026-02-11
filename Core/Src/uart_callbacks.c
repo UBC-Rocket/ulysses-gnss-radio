@@ -5,11 +5,12 @@
  * Routes UART events to appropriate driver modules:
  * - USART1: Debug console (DMA circular + Character Match on '\n')
  * - USART5: Radio transceiver (DMA circular + Character Match on 0x00)
- * - USART6: GPS module (DMA + IDLE, unchanged)
+ * - USART6: GPS module (DMA circular + Character Match on '\n')
  *
  * Character Match (CM) provides deterministic message framing:
  * - USART1 fires only when '\n' arrives (complete line ready)
  * - USART5 fires only when 0x00 arrives (complete radio message ready)
+ * - USART6 fires only when '\n' arrives (complete NMEA sentence ready)
  * - HAL doesn't implement CM handling, so we do it in the ISR layer
  */
 
@@ -126,6 +127,11 @@ void uart_cm_handler(UART_HandleTypeDef *huart)
          */
         radio_rx_event_callback(huart, pos);
     }
+    else if (huart->Instance == USART6)
+    {
+        /* GPS CM on '\n': complete NMEA sentence ready */
+        gps_rx_event_callback(huart, pos);
+    }
 }
 
 /* ============================================================================
@@ -170,16 +176,13 @@ static void uart1_line_received(const uint8_t *line, uint16_t len)
 /**
  * @brief DMA RX Event callback for IDLE/HT/TC events
  *
- * USART6 (GPS) uses IDLE as its primary trigger.
- * USART1 and USART5 use Character Match only (handled in uart_cm_handler).
+ * All three UARTs now use Character Match as their primary trigger.
+ * This callback is kept for HAL compatibility but no longer routes GPS events.
  */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
-    if (huart->Instance == USART6)
-    {
-        /* GPS DMA event (IDLE, Half-Transfer, or Transfer-Complete) */
-        gps_rx_event_callback(huart, Size);
-    }
+    (void)huart;
+    (void)Size;
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)

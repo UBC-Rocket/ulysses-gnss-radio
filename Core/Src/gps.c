@@ -1,14 +1,10 @@
 /**
  * @file gps.c
- * @brief GPS Driver using DMA + IDLE line detection
+ * @brief GPS Driver using DMA circular + Character Match on '\n'
  *
  * Receives NMEA sentences from GPS module via UART6 using DMA in circular mode.
- * Interrupts only on:
- *   - IDLE line detection (end of transmission burst)
- *   - DMA Half-Transfer (buffer 50% full)
- *   - DMA Transfer-Complete (buffer wrap-around)
- *
- * This is ~80x more efficient than per-byte interrupts for typical NMEA traffic.
+ * Interrupts only on Character Match ('\n') — fires once per complete NMEA sentence.
+ * This matches the USART1 and USART5 CM pattern used throughout the project.
  *
  * Author: Ernie Han (original), refactored for DMA by UBC Rocket
  */
@@ -121,14 +117,18 @@ void gps_init(UART_HandleTypeDef *gps_uart, UART_HandleTypeDef *out_uart)
     /* Initialize lwgps parser */
     lwgps_init(&s_lwgps);
 
-    /* Start DMA receive with IDLE line detection */
+    /* Start DMA circular receive with Character Match on '\n' */
     if (s_gps) {
-        /* Use ReceiveToIdle_DMA for automatic IDLE detection */
-        HAL_UARTEx_ReceiveToIdle_DMA(s_gps, s_dma_buf, GPS_DMA_BUF_SIZE);
+        /* Set Character Match address to '\n' (NMEA sentence terminator) */
+        __HAL_UART_DISABLE(s_gps);
+        MODIFY_REG(s_gps->Instance->CR2, USART_CR2_ADD,
+                   ((uint32_t)'\n' << USART_CR2_ADD_Pos));
+        __HAL_UART_ENABLE(s_gps);
 
-        /* Enable DMA Half-Transfer interrupt for periodic processing */
-        /* (ReceiveToIdle_DMA enables IDLE and TC by default) */
-        __HAL_DMA_ENABLE_IT(s_gps->hdmarx, DMA_IT_HT);
+        /* Start DMA circular reception (CM is the only trigger) */
+        HAL_UART_Receive_DMA(s_gps, s_dma_buf, GPS_DMA_BUF_SIZE);
+        __HAL_DMA_DISABLE_IT(s_gps->hdmarx, DMA_IT_HT | DMA_IT_TC);
+        __HAL_UART_ENABLE_IT(s_gps, UART_IT_CM);
     }
 }
 
@@ -146,16 +146,13 @@ void gps_process(void)
  * ============================================================================ */
 
 /**
- * @brief Called when IDLE line detected OR DMA transfer complete
+ * @brief Called when Character Match ('\n') detected on USART6
  *
- * This is the main receive callback for DMA + IDLE mode.
- * HAL_UARTEx_RxEventCallback fires on:
- *   - IDLE line detection (most common - end of GPS burst)
- *   - DMA Half-Transfer (buffer 50% full)
- *   - DMA Transfer-Complete (buffer 100% full / wrap)
+ * This is the main receive callback for DMA circular + CM mode.
+ * Called from uart_cm_handler() when CMF fires on '\n'.
  *
  * @param huart UART handle
- * @param Size Number of bytes received since last event
+ * @param Size Current position in DMA buffer
  */
 void gps_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size)
 {
@@ -178,10 +175,11 @@ void gps_uart_error_callback(UART_HandleTypeDef *huart)
         return;
     }
 
-    /* Reset and restart DMA */
+    /* Reset and restart DMA circular reception with CM */
     s_last_pos = 0;
-    HAL_UARTEx_ReceiveToIdle_DMA(s_gps, s_dma_buf, GPS_DMA_BUF_SIZE);
-    __HAL_DMA_ENABLE_IT(s_gps->hdmarx, DMA_IT_HT);
+    HAL_UART_Receive_DMA(s_gps, s_dma_buf, GPS_DMA_BUF_SIZE);
+    __HAL_DMA_DISABLE_IT(s_gps->hdmarx, DMA_IT_HT | DMA_IT_TC);
+    __HAL_UART_ENABLE_IT(s_gps, UART_IT_CM);
 }
 
 /**

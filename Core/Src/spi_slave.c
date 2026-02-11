@@ -1239,6 +1239,9 @@ void spi_slave_spi1_irq_handler(void) {
         case CMD_RADIO_RXBUF_LEN: {
             // Return number of messages in radio queue (0-255)
             ctx.tx_buf[CMD_OVERHEAD] = radio_queue_count(ctx.radio_queue);
+#ifdef DEBUG
+            debug_uart_log_spi_buflen(ctx.tx_buf[CMD_OVERHEAD]);
+#endif
             break;
         }
 
@@ -1540,8 +1543,14 @@ void spi_slave_nss_exti_handler(void) {
 
                     // Remove the message from the queue - it's been sent successfully
                     if (ctx.pending_push_type == PUSH_TYPE_RADIO && ctx.radio_queue) {
+#ifdef DEBUG
+                        debug_uart_log_spi_radio_read(&ctx.tx_buf[PUSH_TYPE_BYTES], tx_sent - PUSH_TYPE_BYTES);
+#endif
                         radio_message_queue_pop(ctx.radio_queue);
                     } else if (ctx.pending_push_type == PUSH_TYPE_GPS && ctx.gps_queue) {
+#ifdef DEBUG
+                        debug_uart_log_spi_gps_read(&ctx.tx_buf[PUSH_TYPE_BYTES], tx_sent - PUSH_TYPE_BYTES);
+#endif
                         gps_sample_queue_pop(ctx.gps_queue);
                     }
 
@@ -1718,15 +1727,26 @@ void spi_slave_nss_exti_handler(void) {
 
                 if (ctx.current_cmd == CMD_RADIO_RX_FIFO) {
                     if (tx_sent >= PULL_RADIO_TOTAL && ctx.radio_queue) {
+#ifdef DEBUG
+                        debug_uart_log_spi_radio_read(&ctx.tx_buf[CMD_OVERHEAD], PULL_RADIO_PAYLOAD);
+#endif
                         radio_message_queue_pop(ctx.radio_queue);
                     }
                 } else if (ctx.current_cmd == CMD_RADIO_RX_LIFO) {
                     if (tx_sent >= PULL_RADIO_TOTAL && ctx.radio_queue) {
+#ifdef DEBUG
+                        debug_uart_log_spi_radio_read(&ctx.tx_buf[CMD_OVERHEAD], PULL_RADIO_PAYLOAD);
+#endif
                         radio_message_queue_pop_lifo(ctx.radio_queue);
                     }
                 } else if (ctx.current_cmd == CMD_GPS_RX) {
+                    // GPS: Do NOT pop — master always receives latest NMEA sentence.
+                    // The double-buffer queue overwrites on new data, so repeated reads
+                    // return the same sentence until a new one arrives from the GPS module.
                     if (tx_sent >= PULL_GPS_TOTAL && ctx.gps_queue) {
-                        gps_sample_queue_pop(ctx.gps_queue);
+#ifdef DEBUG
+                        debug_uart_log_spi_gps_read(&ctx.tx_buf[CMD_OVERHEAD], PULL_GPS_PAYLOAD);
+#endif
                     }
                 }
             }

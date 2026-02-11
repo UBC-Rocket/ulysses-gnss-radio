@@ -5,7 +5,7 @@
  * Routes UART events to appropriate driver modules:
  * - USART1: Debug console (DMA circular + Character Match on '\n')
  * - USART5: Radio transceiver (DMA circular + Character Match on 0x00)
- * - USART6: GPS module (DMA + IDLE, unchanged)
+ * - USART6: GPS module (DMA circular + Character Match on '\n')
  */
 
 #ifndef UART_CALLBACKS_H
@@ -46,6 +46,7 @@ void uart_callbacks_init(UART_HandleTypeDef *huart1_handle);
  * Routes CM events to appropriate processing:
  * - USART1: Extract line from circular DMA buffer, process complete line
  * - USART5: Call radio_rx_event_callback with current DMA position
+ * - USART6: Call gps_rx_event_callback with current DMA position
  *
  * @param huart UART handle that triggered the CM event
  */
@@ -58,8 +59,8 @@ void uart_cm_handler(UART_HandleTypeDef *huart);
 /**
  * @brief DMA RX Event callback for IDLE/HT/TC events
  *
- * Routes DMA events to GPS (UART6) and Radio (UART5) drivers.
- * For USART5, IDLE serves as a safety net (CM is the primary trigger).
+ * All UARTs now use Character Match as their primary trigger.
+ * This callback is kept for HAL compatibility but no longer routes events.
  * Called automatically by HAL from interrupt context.
  */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size);

@@ -43,7 +43,7 @@ This board offloads GPS and radio communication from the main flight controller,
   - Bytes 1-7: GPS configuration (update rate, constellation, reserved)
 
 ### GPS Integration
-- **Reception**: DMA + IDLE line detection on USART6
+- **Reception**: DMA circular + Character Match on '\n' via USART6
 - **Parsing**: lwgps library (NMEA 0183 standard)
 - **Supported sentences**: GPGGA, GPRMC, GPGSA, GPGSV (+ GLONASS variants)
 - **Dual queue system**:
@@ -68,15 +68,18 @@ USART1 serves dual purpose when compiled with DEBUG macro:
 - Binary protocol for test message injection
 - `0x52 ('R') + payload` → Inject radio message
 - `0x47 ('G') + payload` → Inject GPS NMEA sentence
-- Fully emulates real peripheral behavior via DMA + IDLE
+- Fully emulates real peripheral behavior via DMA + CM
 
 **TX (System Logging)**:
 - Human-readable event logging
 - Log formats:
-  - `[RADIO RX] <hex> (<ASCII>)`
-  - `[GPS NMEA] <sentence>`
-  - `[GPS FIX] Lat: X, Lon: Y, Alt: Z, ...`
-  - `[SPI TX] Radio msg from master: <hex>`
+  - `[RADIO RX] <hex> (<ASCII>)` - Radio message received from UART5
+  - `[GPS NMEA] <sentence>` - GPS NMEA sentence received from UART6
+  - `[GPS FIX] Lat: X, Lon: Y, Alt: Z, ...` - Decoded GPS fix
+  - `[SPI TX] Radio msg from master: <hex>` - Radio TX from SPI master
+  - `[SPI->M] Radio: <hex> (<ASCII>)` - Radio message sent to SPI master
+  - `[SPI->M] GPS: <data>` - GPS data sent to SPI master
+  - `[SPI->M] BufLen: <count>` - Buffer length response sent to SPI master
 - Zero code size impact in Release builds
 
 ## Build System

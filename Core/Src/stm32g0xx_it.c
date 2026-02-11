@@ -226,6 +226,13 @@ void USART3_4_5_6_LPUART1_IRQHandler(void)
       __HAL_UART_CLEAR_FLAG(&huart5, UART_CLEAR_CMF);
       uart_cm_handler(&huart5);
   }
+  // Character Match on '\n' for USART6 GPS (HAL doesn't handle CM)
+  if (__HAL_UART_GET_FLAG(&huart6, UART_FLAG_CMF) &&
+      __HAL_UART_GET_IT_SOURCE(&huart6, UART_IT_CM))
+  {
+      __HAL_UART_CLEAR_FLAG(&huart6, UART_CLEAR_CMF);
+      uart_cm_handler(&huart6);
+  }
   /* USER CODE END USART3_4_5_6_LPUART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart5);
   HAL_UART_IRQHandler(&huart6);

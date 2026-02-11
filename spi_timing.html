@@ -221,23 +221,19 @@
 
 <h1>GNSS/Radio Slave — SPI Communication Protocol</h1>
 <div class="subtitle">Flight Controller ↔ GNSS/Radio Board — Timing Specification &amp; Protocol Definition</div>
-<div class="doc-id">REV 0.1 — DRAFT — Feb 2026</div>
+<div class="doc-id">REV 0.2 — Feb 2026</div>
 
 <!-- ============================================================ -->
-<!-- DEPRECATION WARNING -->
+<!-- ACCURACY NOTE -->
 <!-- ============================================================ -->
-<div style="background: #ffe6e6; border: 3px solid #cc0000; padding: 20px; margin: 20px 0; border-radius: 4px;">
-  <h2 style="color: #cc0000; margin-top: 0;">⚠️ DEPRECATED DOCUMENT</h2>
+<div style="background: #fff8e6; border: 3px solid #cc8800; padding: 20px; margin: 20px 0; border-radius: 4px;">
+  <h2 style="color: #cc8800; margin-top: 0;">Note on Diagram Accuracy</h2>
   <p style="font-size: 14px; line-height: 1.6; margin-bottom: 0;">
-    <strong>This document contains several inaccuracies and is no longer maintained.</strong><br/>
-    Last accurate as of: February 2026 (Rev 0.1 Draft)<br/><br/>
-    <strong>Known issues:</strong><br/>
-    • Incorrect dummy byte count (shows 2, actual is 4)<br/>
-    • Wrong IRQ polarity (shows active low, actual is active high)<br/>
-    • All transaction sizes are 2 bytes too small<br/>
-    • GPS push payload size shown as "TBD", actual is 48 bytes<br/>
-    • Collision detection described incorrectly<br/><br/>
-    <strong>For accurate information, refer to source code:</strong><br/>
+    <strong>Tables and captions reflect the correct implementation.</strong>
+    Timing diagram waveforms have minor visual simplifications:<br/><br/>
+    • Diagrams show 2 dummy bytes for visual clarity (actual is 4 — captions note this)<br/>
+    • IRQ waveforms show active-low style (actual is <strong>active high</strong> on PB2)<br/><br/>
+    <strong>Authoritative references:</strong><br/>
     <code>Core/Inc/protocol_config.h</code> — Protocol definitions and constants<br/>
     <code>Core/Src/spi_slave.c</code> — Actual implementation<br/>
     <code>README.md</code> — Up-to-date documentation
@@ -953,7 +949,7 @@
 
 <hr/>
 <div style="font-size:11px; color:var(--muted); margin-top:20px;">
-  End of document — Rev 0.1 Draft
+  End of document — Rev 0.2
 </div>
 
 </body>
