@@ -113,6 +113,12 @@ int main(void)
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
 
+  // Release GPS from reset BEFORE starting UART reception.
+  // GPS TX line is LOW/floating while module is in reset, which causes
+  // continuous UART framing errors that corrupt the DMA state machine.
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
+  HAL_Delay(10);  // Let GPS TX line stabilize to idle HIGH
+
   // Initialize GPS queue (for raw NMEA)
   gps_sample_queue_init(&gps_sample_queue);
 
@@ -182,7 +188,6 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1, GPIO_PIN_SET);
   while (1)
   {
@@ -482,7 +487,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, STAT_LEDR_Pin|GPS_PULSE_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(STAT_LEDR_GPIO_Port, STAT_LEDR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0|GPIO_PIN_1, GPIO_PIN_RESET);
@@ -494,12 +499,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : STAT_LEDR_Pin GPS_PULSE_Pin */
-  GPIO_InitStruct.Pin = STAT_LEDR_Pin|GPS_PULSE_Pin;
+  /*Configure GPIO pin : STAT_LEDR_Pin */
+  GPIO_InitStruct.Pin = STAT_LEDR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(STAT_LEDR_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PD0 PD1 */
   GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
