@@ -52,6 +52,14 @@ static uint16_t s_msg_len = 0;
 /** Driver initialized flag */
 static bool s_initialized = false;
 
+#ifdef DEBUG
+/** Diagnostic counters */
+static volatile uint32_t s_cm_events = 0;
+static volatile uint32_t s_bytes_fed = 0;
+static volatile uint32_t s_msgs_enqueued = 0;
+static volatile uint32_t s_uart_errors = 0;
+#endif
+
 /* ============================================================================
  * Forward Declarations
  * ============================================================================ */
@@ -79,6 +87,12 @@ void radio_init(radio_message_queue_t *queue)
     MODIFY_REG(huart5.Instance->CR2, USART_CR2_ADD,
                ((uint32_t)0x00 << USART_CR2_ADD_Pos));
     __HAL_UART_ENABLE(&huart5);
+
+    /* Fix: MSP configures USART5 RX DMA as NORMAL, but we need CIRCULAR.
+     * Without circular mode, DMA stops after RADIO_DMA_BUF_SIZE bytes and
+     * the radio goes deaf. Re-init the DMA channel as circular before starting. */
+    huart5.hdmarx->Init.Mode = DMA_CIRCULAR;
+    HAL_DMA_Init(huart5.hdmarx);
 
     /* Start DMA circular reception (no IDLE — CM is the only trigger) */
     HAL_UART_Receive_DMA(&huart5, s_dma_buf, RADIO_DMA_BUF_SIZE);
@@ -173,6 +187,9 @@ void radio_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size)
         return;
     }
 
+#ifdef DEBUG
+    s_cm_events++;
+#endif
     process_dma_data(Size);
 }
 
@@ -185,6 +202,9 @@ void radio_uart_error_callback(UART_HandleTypeDef *huart)
         return;
     }
 
+#ifdef DEBUG
+    s_uart_errors++;
+#endif
     /* Reset and restart circular DMA + CM */
     s_last_pos = 0;
     s_msg_len = 0;
@@ -245,11 +265,18 @@ static void feed_byte(uint8_t b)
         return;
     }
 
+#ifdef DEBUG
+    s_bytes_fed++;
+#endif
+
     if (b == 0x00) {
         /* Null terminator - end of message */
         if (s_msg_len > 0) {
             /* Enqueue the accumulated message */
             radio_message_enqueue(s_msg_len, s_msg_buf, rx_queue);
+#ifdef DEBUG
+            s_msgs_enqueued++;
+#endif
 
 #ifdef DEBUG
             /* Log to debug console */
@@ -272,3 +299,15 @@ static void feed_byte(uint8_t b)
         }
     }
 }
+
+#ifdef DEBUG
+radio_diag_t radio_get_diag(void)
+{
+    radio_diag_t d;
+    d.cm_events = s_cm_events;
+    d.bytes_fed = s_bytes_fed;
+    d.msgs_enqueued = s_msgs_enqueued;
+    d.uart_errors = s_uart_errors;
+    return d;
+}
+#endif

@@ -43,7 +43,7 @@ extern "C" {
 #define DEBUG_UART_TYPE_GPS   0x47
 
 /** Maximum pending log messages in queue */
-#define DEBUG_UART_LOG_QUEUE_DEPTH 20
+#define DEBUG_UART_LOG_QUEUE_DEPTH 32
 
 /** Maximum characters per log message */
 #define DEBUG_UART_LOG_MSG_SIZE 256
@@ -132,6 +132,17 @@ void debug_uart_log_gps_nmea(const char *nmea);
 void debug_uart_log_gps_fix(const gps_fix_t *fix);
 
 /**
+ * @brief Log GPS parse with no valid fix
+ *
+ * Formats: "[GPS NOFIX] fix=%u sats=%u"
+ * Called from gps.c when NMEA sentence parsed but no valid fix.
+ *
+ * @param fix_status Fix quality from lwgps (0=invalid)
+ * @param sats Satellites in use
+ */
+void debug_uart_log_gps_no_fix(uint8_t fix_status, uint8_t sats);
+
+/**
  * @brief Log SPI radio TX message to debug console
  *
  * Formats and enqueues message: "[SPI TX] Radio msg from master: <hex> (<ASCII>)"
@@ -177,11 +188,51 @@ void debug_uart_log_spi_buflen(uint8_t count);
 /**
  * @brief Process and transmit pending log messages
  *
- * Dequeues and transmits log messages via UART1 TX (blocking).
- * Should be called regularly from main loop to drain log queue.
- * Transmits one message per call to avoid blocking too long.
+ * Starts a DMA transfer for the next queued message. Non-blocking —
+ * returns immediately after kicking DMA. Call regularly from main loop.
  */
 void debug_uart_process_logs(void);
+
+/**
+ * @brief DMA TX complete callback
+ *
+ * Called from HAL_UART_TxCpltCallback when USART1 DMA TX finishes.
+ * Advances the log queue tail and clears the DMA busy flag.
+ */
+void debug_uart_dma_tx_cplt(void);
+
+/**
+ * @brief Log push mode event with key metrics
+ *
+ * Formats: "[SPI PUSH] <event> type=0x%02X tx=%u rx=%u"
+ * Called from spi_slave.c NSS handler for push mode state transitions.
+ *
+ * @param event Short event description (e.g. "COMPLETE", "INCOMPLETE", "NOT-YET-READ")
+ * @param type Push type byte (PUSH_TYPE_RADIO or PUSH_TYPE_GPS)
+ * @param tx_sent Number of TX bytes clocked out
+ * @param rx_received Number of RX bytes received from master
+ */
+void debug_uart_log_spi_push_event(const char *event, uint8_t type,
+                                    uint16_t tx_sent, uint16_t rx_received);
+
+/**
+ * @brief Log push mode idle arm
+ *
+ * Formats: "[SPI IDLE] Armed for master TX capture"
+ * Called from arm_push_idle() after RX DMA is armed.
+ */
+void debug_uart_log_spi_idle_arm(void);
+
+/**
+ * @brief Log push mode data arm
+ *
+ * Formats: "[SPI PUSH] Armed type=0x%02X len=%u"
+ * Called from arm_push() / prepare_push() when push data is loaded.
+ *
+ * @param type Push type byte
+ * @param len Total transaction length
+ */
+void debug_uart_log_spi_push_arm(uint8_t type, uint16_t len);
 
 /**
  * @brief Log SPI ARM state (idle state after arm)
@@ -204,6 +255,48 @@ void debug_uart_log_spi_arm(const spi_debug_capture_t *dbg);
  * @param dbg Pointer to debug capture structure
  */
 void debug_uart_log_spi_txn(const spi_debug_capture_t *dbg);
+
+/**
+ * @brief Log periodic SPI statistics
+ *
+ * Formats: "[SPI STATS] push=N txn=N inc=N mtx=N ovr=N"
+ * Called from spi_slave_tick() every few seconds.
+ */
+/**
+ * @brief Log NSS edge event with current SPI state
+ *
+ * Formats: "[SPI NSS] FALL state=N" or "[SPI NSS] RISE state=N"
+ * Called from EXTI handler on NSS transitions.
+ *
+ * @param falling true for falling edge (CS assert), false for rising (CS deassert)
+ * @param state Current SPI state machine state
+ */
+void debug_uart_log_spi_nss_event(bool falling, uint8_t state);
+
+void debug_uart_log_spi_stats(uint32_t push_txns, uint32_t total_txns,
+                               uint32_t incomplete, uint32_t master_tx,
+                               uint32_t overruns);
+
+/**
+ * @brief Log radio UART5 diagnostic snapshot
+ *
+ * Prints CM event count, bytes processed, messages enqueued, UART errors,
+ * plus raw USART5 register state and DMA counter to diagnose radio intake.
+ * Call periodically from main loop (e.g. every 5 seconds).
+ *
+ * @param cm_events Character Match ISR invocations
+ * @param bytes_fed Total bytes through feed_byte
+ * @param msgs_enqueued Messages completed and enqueued
+ * @param uart_errors UART error callback invocations
+ * @param uart_cr1 USART5->CR1 (check CMIE bit 14)
+ * @param uart_cr3 USART5->CR3 (check DMAR bit 6, EIE bit 0)
+ * @param uart_isr USART5->ISR (check ORE/FE/NE flags)
+ * @param dma_cndtr DMA1_Channel6->CNDTR (512 = no data received)
+ */
+void debug_uart_log_radio_diag(uint32_t cm_events, uint32_t bytes_fed,
+                                uint32_t msgs_enqueued, uint32_t uart_errors,
+                                uint32_t uart_cr1, uint32_t uart_cr3,
+                                uint32_t uart_isr, uint16_t dma_cndtr);
 
 #ifdef __cplusplus
 }

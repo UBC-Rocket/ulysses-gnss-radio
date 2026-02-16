@@ -64,14 +64,6 @@ typedef enum {
 #define MAX_TRANSACTION_SIZE     PULL_RADIO_TOTAL  // 261 bytes
 
 // ----------------------------------------------------------------------------
-// Collision Detection Timing
-// ----------------------------------------------------------------------------
-
-// Minimum time (microseconds) for master to respond to IRQ assertion
-// If CS falls within this time after IRQ assertion, it's a collision
-#define T_RACE_US                15   // Conservative estimate, tune during testing
-
-// ----------------------------------------------------------------------------
 // Configuration Frame Structure (Startup)
 // ----------------------------------------------------------------------------
 typedef struct {

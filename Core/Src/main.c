@@ -14,6 +14,7 @@
 #include <string.h>
 #include "radio_queue.h"
 #include "gps_nema_queue.h"
+#include "gps_fix_queue.h"
 #include "spi_slave.h"
 #include "radio_driver.h"
 #include "gps.h"
@@ -57,6 +58,7 @@ DMA_HandleTypeDef hdma_usart6_rx;
 static radio_message_queue_t radio_rx_queue;
 static radio_message_queue_t radio_tx_queue;
 static gps_sample_queue_t gps_sample_queue;
+static gps_fix_queue_t gps_fix_queue;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -119,12 +121,14 @@ int main(void)
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
   HAL_Delay(10);  // Let GPS TX line stabilize to idle HIGH
 
-  // Initialize GPS queue (for raw NMEA)
-  gps_sample_queue_init(&gps_sample_queue);
+  // Initialize GPS queues
+  gps_sample_queue_init(&gps_sample_queue);  // Pull mode: raw NMEA
+  gps_fix_queue_init(&gps_fix_queue);        // Push mode: parsed fixes
 
-  // Initialize GPS driver with shared queue
+  // Initialize GPS driver with shared queues
   gps_set_queue(&gps_sample_queue);
-  gps_init(&huart6, &huart1);  // GPS on UART6, debug output on UART1
+  gps_set_fix_queue(&gps_fix_queue);
+  gps_init(&huart6, NULL);  // GPS on UART6, no raw NMEA echo (frees UART1 for debug log)
 
   // Initialize radio driver (handles its own queue initialization)
   radio_init(&radio_rx_queue);
@@ -143,7 +147,7 @@ int main(void)
   config_frame_t config_frame;
   //HAL_StatusTypeDef status = HAL_SPI_Receive(&hspi1, (uint8_t*)&config_frame, sizeof(config_frame_t), HAL_MAX_DELAY);
   HAL_StatusTypeDef status = HAL_OK;
-  config_frame.mode = SPI_MODE_PULL;
+  config_frame.mode = SPI_MODE_PUSH;
   if (status == HAL_OK) {
       // Parse and validate the mode
       spi_protocol_mode_t mode;
@@ -172,8 +176,26 @@ int main(void)
 #endif
   }
 
+  // Wait for master flight controller to finish booting and initialize SPI1 bus.
+  // Without this delay, the slave may assert IRQ before the master is ready,
+  // causing missed or corrupted transactions.
+#ifdef DEBUG
+  HAL_UART_Transmit(&huart1, (uint8_t*)"Waiting 3s for master to initialize...\r\n", 40, 100);
+#endif
+  {
+      // Drain debug log queue during wait so GPS NMEA messages don't
+      // overflow the 20-entry queue and cause SPI messages to be dropped.
+      uint32_t wait_start = HAL_GetTick();
+      while (HAL_GetTick() - wait_start < 3000) {
+#ifdef DEBUG
+          debug_uart_process_logs();
+#endif
+          HAL_Delay(1);
+      }
+  }
+
   // Initialize SPI slave (uses radio RX, radio TX, and GPS queues)
-  spi_slave_init(&radio_rx_queue, &radio_tx_queue, &gps_sample_queue);
+  spi_slave_init(&radio_rx_queue, &radio_tx_queue, &gps_sample_queue, &gps_fix_queue);
 
 #ifdef DEBUG
   // One-shot SPI state dump after initialization
@@ -207,24 +229,44 @@ int main(void)
           radio_message_dequeue(&radio_tx_queue, tx_msg);
 
           // Find actual message length (null-padded to 256)
-          uint8_t tx_len = 0;
+          uint16_t tx_len = 0;
           while (tx_len < RADIO_MESSAGE_MAX_LEN && tx_msg[tx_len] != 0) {
               tx_len++;
           }
 
           if (tx_len > 0) {
               radio_send(tx_msg, tx_len);
+#ifdef DEBUG
+              debug_uart_log_spi_radio_tx(tx_msg, tx_len);
+#endif
           }
       }
 
 #ifdef DEBUG
-      // Log SPI transaction debug data when new transaction detected
+      // Log SPI transaction debug data (rate-limited to avoid flooding queue)
       {
+          static uint32_t last_spi_txn_tick = 0;
           static uint32_t last_spi_exti = 0;
           const spi_debug_capture_t *spi_dbg = spi_slave_get_debug_capture();
-          if (spi_dbg->exti_count != last_spi_exti) {
+          uint32_t now_spi = HAL_GetTick();
+          if (spi_dbg->exti_count != last_spi_exti && (now_spi - last_spi_txn_tick >= 2000)) {
               last_spi_exti = spi_dbg->exti_count;
+              last_spi_txn_tick = now_spi;
               debug_uart_log_spi_txn(spi_dbg);
+          }
+      }
+
+      // Periodic radio UART5 health check (every 5 seconds)
+      {
+          static uint32_t last_radio_diag_tick = 0;
+          uint32_t now = HAL_GetTick();
+          if (now - last_radio_diag_tick >= 5000) {
+              last_radio_diag_tick = now;
+              radio_diag_t rd = radio_get_diag();
+              debug_uart_log_radio_diag(
+                  rd.cm_events, rd.bytes_fed, rd.msgs_enqueued, rd.uart_errors,
+                  huart5.Instance->CR1, huart5.Instance->CR3,
+                  huart5.Instance->ISR, (uint16_t)huart5.hdmarx->Instance->CNDTR);
           }
       }
 
@@ -478,40 +520,29 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, FC_INT_Pin|STAT_LEDR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(STAT_LEDR_GPIO_Port, STAT_LEDR_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPS_RST_GPIO_Port, GPS_RST_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0|GPIO_PIN_1, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : PC13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  /*Configure GPIO pins : FC_INT_Pin STAT_LEDR_Pin */
+  GPIO_InitStruct.Pin = FC_INT_Pin|STAT_LEDR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : STAT_LEDR_Pin */
-  GPIO_InitStruct.Pin = STAT_LEDR_Pin;
+  /*Configure GPIO pin : GPS_RST_Pin */
+  GPIO_InitStruct.Pin = GPS_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(STAT_LEDR_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PD0 PD1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPS_RST_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

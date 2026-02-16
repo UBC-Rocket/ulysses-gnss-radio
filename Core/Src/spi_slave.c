@@ -4,7 +4,7 @@
  *
  * Hardware Configuration:
  * - SPI1 on PA4(NSS), PA5(SCK), PA6(MISO), PA7(MOSI)
- * - IRQ output on PB2 (active high, for push mode)
+ * - IRQ output on PB1 (active high, for push mode)
  * - DMA1 Channel 1 (RX), Channel 2 (TX)
  *
  * Implements hybrid RXNE interrupt + DMA approach:
@@ -72,7 +72,7 @@ static void spi_slave_prepare_push(uint8_t push_type);
  * - PA5: SCK  (clock from master)
  * - PA6: MISO (master in, slave out - our TX line)
  * - PA7: MOSI (master out, slave in - our RX line)
- * - PB2: IRQ  (push mode interrupt, active high)
+ * - PB1: IRQ  (push mode interrupt, active high)
  */
 static void spi_gpio_init(void) {
     // ── Enable GPIO Port Clocks ──
@@ -166,7 +166,7 @@ static void spi_gpio_init(void) {
                     | (SPI_AF_NUM << (6*4))    // PA6 MISO → AF0 (SPI1)
                     | (SPI_AF_NUM << (7*4));   // PA7 MOSI → AF0 (SPI1)
 
-    // ── Configure Push Mode IRQ Pin (PB2) ──
+    // ── Configure Push Mode IRQ Pin (PB1) ──
     // This pin is used to signal the master that we have data to send (push mode).
     //
     // WHY general output mode (not alternate function)?
@@ -183,14 +183,14 @@ static void spi_gpio_init(void) {
     // Initial state: LOW (inactive)
     // - Master should not see an IRQ assertion during our initialization
     // - We'll assert it high only when we actually have data to push
-    GPIOB->MODER = (GPIOB->MODER & ~(3 << (2*2))) | (1 << (2*2));  // Mode 0b01 = output
+    GPIOB->MODER = (GPIOB->MODER & ~(3 << (1*2))) | (1 << (1*2));  // Mode 0b01 = output
     GPIOB->BSRR = IRQ_GPIO_PIN << 16;  // Write to upper 16 bits of BSRR → reset (low)
     //
     // Note on BSRR (Bit Set/Reset Register):
     // - Lower 16 bits [15:0]: Writing 1 SETS the corresponding pin (drives high)
     // - Upper 16 bits [31:16]: Writing 1 RESETS the corresponding pin (drives low)
     // - This allows atomic set/reset without read-modify-write (no race conditions)
-    // - IRQ_GPIO_PIN is GPIO_PIN_2 (bit 2), so IRQ_GPIO_PIN << 16 = bit 18
+    // - IRQ_GPIO_PIN is GPIO_PIN_1 (bit 1), so IRQ_GPIO_PIN << 16 = bit 17
 }
 
 /**
@@ -1015,26 +1015,42 @@ static void spi_slave_arm_push_idle(void) {
     memset(ctx.tx_buf, 0x00, sizeof(ctx.tx_buf));
     memset(ctx.rx_buf, 0x00, sizeof(ctx.rx_buf));
 
-    // ── Step 4: Configure SPI for Push-Ready State ──
-    // Minimal configuration: 8-bit frames, 1-byte FIFO threshold
-    // NO RXNEIE: We don't wait for command bytes in push mode
-    // NO TXDMAEN/RXDMAEN: DMAs will be enabled when spi_slave_prepare_push() calls spi_slave_arm_push()
+    // ── Step 4: Arm TX DMA (zeros) and RX DMA ──
+    // Even in idle, we arm both DMAs so that the master can send radio TX
+    // messages at any time. TX DMA sends zeros (dummy data on MISO), while
+    // RX DMA captures whatever the master sends on MOSI.
     //
-    // This is a "dormant" state - SPI is enabled but not actively transferring.
-    // When data becomes available, spi_slave_tick() will call spi_slave_prepare_push(),
-    // which will configure and start the DMAs, then assert IRQ.
+    // When spi_slave_tick() detects push data, it calls prepare_push() which
+    // calls arm_push() — that function does its own SPI reset and DMA re-arm,
+    // cleanly replacing these idle DMAs.
+    ctx.tx_dma_length = MAX_TRANSACTION_SIZE;
+    spi_tx_dma_start(ctx.tx_buf, MAX_TRANSACTION_SIZE);
+    spi_rx_dma_start(ctx.rx_buf, MAX_TRANSACTION_SIZE);
+
+    // ── Step 5: Configure SPI CR2 ──
+    // 8-bit data frames, 1-byte FIFO threshold
+    // DMA enables are set AFTER SPE to prevent premature transfers
     SPI1->CR2 = (7 << SPI_CR2_DS_Pos)    // 8-bit data frames (DS=0b0111)
               | SPI_CR2_FRXTH;            // 1-byte FIFO threshold (trigger RXNE every byte)
 
-    // ── Step 5: Enable SPI ──
-    // SPI is now ready to accept a push transaction when data is available
+    // ── Step 6: Enable SPI ──
     SPI1->CR1 |= SPI_CR1_SPE;
+
+    // ── Step 7: Enable DMA after SPE ──
+    // TXDMAEN and RXDMAEN must be set AFTER SPE=1 to prevent premature
+    // DMA transfers while SPI is disabled.
+    SPI1->CR2 |= SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN;
 
     // At this point:
     // - state = IDLE
-    // - SPI enabled, waiting for spi_slave_tick() to prepare push
+    // - SPI enabled with TX/RX DMA armed (zeros on MISO, captures MOSI)
     // - No IRQ asserted (IRQ line is low/inactive)
-    // - Master commands (pull mode) will NOT work in this state
+    // - Master can send radio TX and slave will capture it in NSS handler
+    // - When push data is available, spi_slave_tick() calls prepare_push()
+
+#ifdef DEBUG
+    debug_uart_log_spi_idle_arm();
+#endif
 }
 
 /**
@@ -1131,14 +1147,14 @@ static void spi_slave_prepare_push(uint8_t push_type) {
         // Load type byte
         ctx.tx_buf[0] = PUSH_TYPE_GPS;
 
-        // Load raw NMEA sentence from GPS queue (peek, don't dequeue yet)
-        uint8_t *gps_ptr;
-        if (gps_sample_queue_tail_pointer(ctx.gps_queue, &gps_ptr)) {
-            memcpy(&ctx.tx_buf[PUSH_TYPE_BYTES], gps_ptr, PUSH_GPS_PAYLOAD);
+        // Load parsed GPS fix from fix queue (peek, don't dequeue yet)
+        const gps_fix_t *fix_ptr;
+        if (gps_fix_queue_tail_pointer(ctx.gps_fix_queue, &fix_ptr)) {
+            memcpy(&ctx.tx_buf[PUSH_TYPE_BYTES], (const uint8_t *)fix_ptr, PUSH_GPS_PAYLOAD);
         }
 
-        // Set TX length: type byte + NMEA payload
-        ctx.tx_dma_length = PUSH_GPS_TOTAL;  // 1 + 87 = 88
+        // Set TX length: type byte + gps_fix_t payload
+        ctx.tx_dma_length = PUSH_GPS_TOTAL;  // 1 + 48 = 49
         break;
     }
 
@@ -1152,6 +1168,11 @@ static void spi_slave_prepare_push(uint8_t push_type) {
 
     // Assert IRQ to notify master
     spi_slave_assert_irq();
+
+#ifdef DEBUG
+    debug_uart_log_spi_push_arm(push_type, ctx.tx_dma_length);
+    debug_uart_log_spi_push_event("IRQ_ASSERT_PB1", push_type, ctx.tx_dma_length, 0);
+#endif
 }
 
 // ============================================================================
@@ -1397,6 +1418,14 @@ void spi_slave_nss_exti_handler(void) {
     uint32_t rising_pending = EXTI->RPR1 & (1 << NSS_EXTI_LINE);
 
     if (rising_pending) {
+        // Track whether a push transmission was incomplete (for two-phase master reads).
+        // When true, we skip re-arming so DMA/FIFO state is preserved for the next CS assertion.
+        bool push_incomplete = false;
+
+        // Track whether the handler already re-armed (e.g. not-yet-read path called arm_push).
+        // When true, we skip the bottom-of-handler re-arm.
+        bool push_handled = false;
+
         // ── Clear rising edge pending flag ──
         // RPR1 is write-1-to-clear: writing 1 to bit 4 clears the pending flag.
         // This MUST be done to acknowledge the interrupt, or it will fire again immediately.
@@ -1482,6 +1511,11 @@ void spi_slave_nss_exti_handler(void) {
                 // Configuration frame counts as a transaction for diagnostic purposes.
                 ctx.transactions_completed++;
 
+#ifdef DEBUG
+                debug_uart_log_spi_push_event("CONFIG",
+                                               (uint8_t)s_protocol_mode, 0, 0);
+#endif
+
                 // ── Transition to Normal Operation ──
                 // spi_slave_arm() configures the SPI for the first real transaction:
                 // - Clears buffers, resets state to IDLE
@@ -1492,8 +1526,30 @@ void spi_slave_nss_exti_handler(void) {
             break;
 
         case SPI_STATE_IDLE:
-            // NSS rose before we even got a command byte.
-            // Glitch or aborted transaction. Just re-arm.
+            // NSS rose while idle. Could be a glitch, or the master sent
+            // a radio TX message while no push data was queued.
+            // Since arm_push_idle() now arms RX DMA, check if master sent data.
+            {
+                uint16_t rx_remaining = DMA1_Channel1->CNDTR;
+                uint16_t rx_received = MAX_TRANSACTION_SIZE - rx_remaining;
+
+                if (rx_received >= PUSH_RADIO_PAYLOAD && spi_slave_rx_has_valid_data()) {
+                    if (ctx.radio_tx_queue) {
+                        radio_message_enqueue(PUSH_RADIO_PAYLOAD, ctx.rx_buf, ctx.radio_tx_queue);
+#ifdef DEBUG
+                        debug_uart_log_spi_radio_tx(ctx.rx_buf, PUSH_RADIO_PAYLOAD);
+                        debug_uart_log_spi_push_event("IDLE-RX", 0, 0, rx_received);
+#endif
+                        ctx.master_tx_received++;
+                    }
+                }
+#ifdef DEBUG
+                else if (rx_received > 0) {
+                    debug_uart_log_spi_push_event("IDLE-GLITCH", 0, 0, rx_received);
+                }
+#endif
+            }
+            // Re-arm happens at bottom of handler via arm_push_idle()
             break;
 
         case SPI_STATE_HAVE_DATA:
@@ -1536,93 +1592,82 @@ void spi_slave_nss_exti_handler(void) {
                 // ── Verify TX Completion ──
                 if (tx_sent >= ctx.tx_dma_length) {
                     // ✅ SUCCESS: Full message transmitted
-                    //
-                    // Deassert IRQ to signal completion to master.
-                    // If we left IRQ high, master would think we have more data and start another transaction.
-                    spi_slave_deassert_irq();
 
-                    // Remove the message from the queue - it's been sent successfully
-                    if (ctx.pending_push_type == PUSH_TYPE_RADIO && ctx.radio_queue) {
+                    // ── Check for Simultaneous Master TX (before pop/deassert) ──
+                    // While we pushed data, the master might have sent a radio TX
+                    // message simultaneously. If it did, the master was NOT reading
+                    // our push data — it was sending. We must:
+                    // 1. Enqueue the master's radio TX
+                    // 2. NOT pop our push message (master didn't consume it)
+                    // 3. Re-arm push with same data so master can read it next time
+                    uint16_t rx_remaining = DMA1_Channel1->CNDTR;
+                    uint16_t rx_received = MAX_TRANSACTION_SIZE - rx_remaining;
+
+                    if (rx_received >= PUSH_RADIO_PAYLOAD && spi_slave_rx_has_valid_data()) {
+                        // Master sent radio TX — push data NOT consumed by master
+                        if (ctx.radio_tx_queue) {
+                            radio_message_enqueue(PUSH_RADIO_PAYLOAD, ctx.rx_buf, ctx.radio_tx_queue);
 #ifdef DEBUG
-                        debug_uart_log_spi_radio_read(&ctx.tx_buf[PUSH_TYPE_BYTES], tx_sent - PUSH_TYPE_BYTES);
+                            debug_uart_log_spi_radio_tx(ctx.rx_buf, PUSH_RADIO_PAYLOAD);
+                            debug_uart_log_spi_push_event("NOT-YET-READ", ctx.pending_push_type,
+                                                          tx_sent, rx_received);
 #endif
-                        radio_message_queue_pop(ctx.radio_queue);
-                    } else if (ctx.pending_push_type == PUSH_TYPE_GPS && ctx.gps_queue) {
+                            ctx.master_tx_received++;
+                        }
+                        // Re-arm push with same data (tx_buf still has it from prepare_push)
+                        // IRQ stays asserted, pending_push_type stays set
+                        spi_slave_arm_push();
+                        push_handled = true;
+                    } else {
+                        // Normal push read — master consumed our data
 #ifdef DEBUG
-                        debug_uart_log_spi_gps_read(&ctx.tx_buf[PUSH_TYPE_BYTES], tx_sent - PUSH_TYPE_BYTES);
+                        debug_uart_log_spi_push_event("COMPLETE", ctx.pending_push_type,
+                                                      tx_sent, rx_received);
 #endif
-                        gps_sample_queue_pop(ctx.gps_queue);
+                        spi_slave_deassert_irq();
+
+                        // Remove the message from the queue
+                        if (ctx.pending_push_type == PUSH_TYPE_RADIO && ctx.radio_queue) {
+#ifdef DEBUG
+                            debug_uart_log_spi_radio_read(&ctx.tx_buf[PUSH_TYPE_BYTES], tx_sent - PUSH_TYPE_BYTES);
+#endif
+                            radio_message_queue_pop(ctx.radio_queue);
+                        } else if (ctx.pending_push_type == PUSH_TYPE_GPS && ctx.gps_fix_queue) {
+#ifdef DEBUG
+                            debug_uart_log_spi_gps_read(&ctx.tx_buf[PUSH_TYPE_BYTES], tx_sent - PUSH_TYPE_BYTES);
+#endif
+                            gps_fix_queue_pop(ctx.gps_fix_queue);
+                        }
+
+                        ctx.pending_push_type = 0;
+                        ctx.push_transactions++;
                     }
-
-                    // Clear pending push type (no longer have pending push)
-                    ctx.pending_push_type = 0;
-
-                    ctx.push_transactions++;  // Increment successful push counter
 
                 } else {
                     // ❌ INCOMPLETE: Not enough bytes transmitted
                     //
-                    // Master ended transaction early (stopped clocking before full message sent).
-                    // This could happen if:
-                    // - Master bug (stopped early)
-                    // - Master timed out
-                    // - Electrical glitch (NSS noise)
-                    //
-                    // CRITICAL: Do NOT deassert IRQ, do NOT dequeue message!
-                    // - IRQ stays HIGH → master sees we still have data
-                    // - Message stays in queue → same data available for retry
-                    // - Next transaction: Master reads full message successfully
-                    //
-                    // This guarantees ZERO dropped messages on MISO.
-                    ctx.tx_incomplete_count++;  // Diagnostic counter
-
-                    // NOTE: We do NOT call spi_slave_deassert_irq() here!
-                    // NOTE: We do NOT pop from queue!
-                    // NOTE: pending_push_type stays set (indicates retry needed)
-                }
-
-                // ── Check for Simultaneous Master TX ──
-                // In push mode, both TX and RX DMA are enabled. While we're sending data to master,
-                // master might send data back (e.g., we send GPS fix, master sends radio TX command).
-                //
-                // How do we detect if master sent real data vs dummy clocking?
-                // 1. Check rx_received: If master only clocked to get our data, rx_received ≈ tx_sent
-                // 2. Check RX pattern: If master sent real data, rx_buf has non-zero/non-0xFF pattern
-                //
-                // Example scenario:
-                // - We send PUSH_GPS_TOTAL (49 bytes): TYPE (0x05) + gps_fix_t (48 bytes)
-                // - Master simultaneously sends CMD_RADIO_TX (261 bytes): CMD (0x04) + DUMMY (4) + payload (256)
-                // - rx_received = 261 (master sent full radio TX message)
-                // - spi_slave_rx_has_valid_data() returns true (non-dummy pattern)
-                // - We enqueue the radio TX payload to ctx.radio_queue
-                uint16_t rx_remaining = DMA1_Channel1->CNDTR;
-                uint16_t rx_received = MAX_TRANSACTION_SIZE - rx_remaining;
-
-                // If we received at least a full radio message (256 bytes) AND it's not dummy data...
-                if (rx_received >= PUSH_RADIO_PAYLOAD && spi_slave_rx_has_valid_data()) {
-                    // Master sent a radio TX message simultaneously!
-                    // Enqueue the payload (first 256 bytes of rx_buf) to the radio TX queue.
-                    //
-                    // WHY first 256 bytes?
-                    // - In push mode, master doesn't send CMD + DUMMY bytes like in pull mode
-                    // - Master just sends the raw 256-byte radio payload
-                    // - rx_buf[0..255] contains the radio message directly
-                    if (ctx.radio_tx_queue) {
-                        radio_message_enqueue(PUSH_RADIO_PAYLOAD, ctx.rx_buf, ctx.radio_tx_queue);
+                    // Master ended transaction early (two-phase read phase 1, or glitch).
+                    // Keep IRQ high, keep message in queue, master will come back for phase 2.
+                    ctx.tx_incomplete_count++;
+                    push_incomplete = true;
 #ifdef DEBUG
-                        debug_uart_log_spi_radio_tx(ctx.rx_buf, PUSH_RADIO_PAYLOAD);
-#endif
-                        ctx.master_tx_received++;  // Diagnostic counter
+                    {
+                        uint16_t rx_remaining_inc = DMA1_Channel1->CNDTR;
+                        uint16_t rx_received_inc = MAX_TRANSACTION_SIZE - rx_remaining_inc;
+                        debug_uart_log_spi_push_event("INCOMPLETE", ctx.pending_push_type,
+                                                      tx_sent, rx_received_inc);
                     }
+#endif
                 }
             }
 
             // ── Clear Pending Push Type ──
-            // Reset to 0 (no pending push) now that the transaction is done.
-            ctx.pending_push_type = 0;
-
-            // ── Increment Total Transaction Counter ──
-            ctx.transactions_completed++;
+            // Skip on incomplete push (two-phase phase 1) and on push_handled
+            // (not-yet-read: master sent radio TX, push data kept for retry).
+            if (!push_incomplete && !push_handled) {
+                ctx.pending_push_type = 0;
+                ctx.transactions_completed++;
+            }
             break;
 
         case SPI_STATE_ACTIVE:
@@ -1789,20 +1834,16 @@ void spi_slave_nss_exti_handler(void) {
         // - Prevents mode mixing (slave responding to commands while configured for push)
         // - Ensures consistent behavior: PUSH mode = only push, PULL mode = only pull
         // - Avoids deadlock: In push mode, RXNEIE is not enabled, so pull commands would hang
-        if (s_protocol_mode == SPI_MODE_PUSH) {
-            // Push mode: Arm in push-ready idle state
-            // - state = IDLE (waiting for data to become available)
-            // - No DMAs running yet (spi_slave_tick will configure when data ready)
-            // - No RXNEIE (not accepting pull commands)
-            // - IRQ not asserted yet (will be asserted when data available)
-            spi_slave_arm_push_idle();
-        } else {
-            // Pull mode: Arm in pull-ready state (default)
-            // - state = IDLE (waiting for master to send command)
-            // - RXNEIE enabled (ready to capture command byte)
-            // - TX DMA armed for max transaction size
-            // - RX DMA configured but gated (RXDMAEN enabled in RXNE ISR)
-            spi_slave_arm();
+        // ── Re-arm SPI for next transaction ──
+        // Skip re-arm when:
+        // - push_incomplete: DMA/FIFO still valid for two-phase read phase 2
+        // - push_handled: not-yet-read path already called arm_push() to re-arm
+        if (!push_incomplete && !push_handled) {
+            if (s_protocol_mode == SPI_MODE_PUSH) {
+                spi_slave_arm_push_idle();
+            } else {
+                spi_slave_arm();
+            }
         }
 
     }  // End of if (rising_pending)
@@ -1823,14 +1864,15 @@ void spi_slave_nss_exti_handler(void) {
  * and arms for operation based on the protocol mode set by
  * spi_slave_set_protocol_mode().
  */
-void spi_slave_init(radio_message_queue_t *radio_queue, radio_message_queue_t *radio_tx_queue, gps_sample_queue_t *gps_queue) {
+void spi_slave_init(radio_message_queue_t *radio_queue, radio_message_queue_t *radio_tx_queue, gps_sample_queue_t *gps_queue, gps_fix_queue_t *gps_fix_queue) {
     // Clear context structure
     memset(&ctx, 0, sizeof(ctx));
 
     // Store queue pointers
     ctx.radio_queue = radio_queue;
     ctx.radio_tx_queue = radio_tx_queue;
-    ctx.gps_queue = gps_queue;
+    ctx.gps_queue = gps_queue;            // Pull mode: raw NMEA
+    ctx.gps_fix_queue = gps_fix_queue;    // Push mode: parsed GPS fixes
 
     // ── Enable peripheral clocks ──
     RCC->IOPENR  |= RCC_IOPENR_GPIOBEN;    // GPIO port B
@@ -1916,13 +1958,13 @@ void spi_slave_set_protocol_mode(spi_protocol_mode_t mode) {
 /**
  * @brief Assert IRQ line to master (active high)
  *
- * Sets PB2 high to signal the master that data is ready in push mode.
+ * Sets PB1 high to signal the master that data is ready in push mode.
  *
  * PUSH MODE PROTOCOL:
  * ───────────────────
  * 1. Slave has data (GPS fix or radio message)
  * 2. Slave prepares TX buffer with [TYPE:1][PAYLOAD:N]
- * 3. Slave asserts IRQ (this function) → PB2 goes HIGH
+ * 3. Slave asserts IRQ (this function) → PB1 goes HIGH
  * 4. Master detects IRQ rising edge (via EXTI or polling)
  * 5. Master asserts NSS and clocks data out
  * 6. Slave deasserts IRQ when transaction completes
@@ -1955,23 +1997,23 @@ void spi_slave_assert_irq(void) {
     // Writing 1 to BR[n] (bits [31:16]): Resets pin n LOW
     // Writing 0 to any bit: No effect
     //
-    // Example for PB2 (IRQ_GPIO_PIN = GPIO_PIN_2 = 0x0004 = bit 2):
-    // - IRQ_GPIO_PIN = 0x0004 (bit 2 set)
-    // - Writing to BSRR: GPIOB->BSRR = 0x0004
-    // - Bits [15:0] = 0x0004 → bit 2 of BS → Sets PB2 HIGH
+    // Example for PB1 (IRQ_GPIO_PIN = GPIO_PIN_1 = 0x0002 = bit 1):
+    // - IRQ_GPIO_PIN = 0x0002 (bit 1 set)
+    // - Writing to BSRR: GPIOB->BSRR = 0x0002
+    // - Bits [15:0] = 0x0002 → bit 1 of BS → Sets PB1 HIGH
     //
     // WHY BSRR instead of ODR?
-    // - ODR (Output Data Register) requires read-modify-write: ODR |= (1 << 2)
+    // - ODR (Output Data Register) requires read-modify-write: ODR |= (1 << 1)
     // - If an interrupt fires between read and write, the change could be lost
     // - BSRR is atomic - no race condition, one write operation
-    GPIOB->BSRR = IRQ_GPIO_PIN;  // Write bit 2 to BS field → PB2 = HIGH
+    GPIOB->BSRR = IRQ_GPIO_PIN;  // Write bit 1 to BS field → PB1 = HIGH
     ctx.irq_asserted = true;
 }
 
 /**
  * @brief Deassert IRQ line to master (inactive low)
  *
- * Sets PB2 low to signal the master that the push transaction is complete.
+ * Sets PB1 low to signal the master that the push transaction is complete.
  *
  * WHEN TO DEASSERT?
  * ─────────────────
@@ -1983,17 +2025,17 @@ void spi_slave_deassert_irq(void) {
     // ── Use BSRR to Reset Pin Low ──
     // To reset a pin (drive low), we write to the BR field (bits [31:16]).
     //
-    // Example for PB2 (IRQ_GPIO_PIN = GPIO_PIN_2 = 0x0004 = bit 2):
-    // - We want to write to BR[2] (bit 18 of BSRR)
-    // - IRQ_GPIO_PIN << 16 = 0x0004 << 16 = 0x00040000 (bit 18 set)
-    // - Writing to BSRR: GPIOB->BSRR = 0x00040000
-    // - Bits [31:16] = 0x0004 → bit 2 of BR → Resets PB2 LOW
+    // Example for PB1 (IRQ_GPIO_PIN = GPIO_PIN_1 = 0x0002 = bit 1):
+    // - We want to write to BR[1] (bit 17 of BSRR)
+    // - IRQ_GPIO_PIN << 16 = 0x0002 << 16 = 0x00020000 (bit 17 set)
+    // - Writing to BSRR: GPIOB->BSRR = 0x00020000
+    // - Bits [31:16] = 0x0002 → bit 1 of BR → Resets PB1 LOW
     //
     // WHY shift by 16?
     // - IRQ_GPIO_PIN is the bit position in the lower half (BS field)
     // - To access the upper half (BR field), we shift left by 16 bits
-    // - IRQ_GPIO_PIN << 16 moves bit 2 to bit 18 (BR[2])
-    GPIOB->BSRR = IRQ_GPIO_PIN << 16;  // Write bit 2 to BR field → PB2 = LOW
+    // - IRQ_GPIO_PIN << 16 moves bit 1 to bit 17 (BR[1])
+    GPIOB->BSRR = IRQ_GPIO_PIN << 16;  // Write bit 1 to BR field → PB1 = LOW
     ctx.irq_asserted = false;
 }
 
@@ -2116,6 +2158,29 @@ void spi_slave_tick(void) {
         return;
     }
 
+#ifdef DEBUG
+    // ── Periodic Stats & Tick Diagnostics ──
+    {
+        static uint32_t last_stats_tick = 0;
+        uint32_t now = HAL_GetTick();
+        if (now - last_stats_tick >= 2000) {
+            last_stats_tick = now;
+            debug_uart_log_spi_stats(ctx.push_transactions,
+                                      ctx.transactions_completed,
+                                      ctx.tx_incomplete_count,
+                                      ctx.master_tx_received,
+                                      ctx.overrun_errors);
+            // Show tick guard state so we can see WHY IRQ isn't asserting
+            bool gps_has = (ctx.gps_fix_queue && !gps_fix_queue_empty(ctx.gps_fix_queue));
+            bool radio_has = (ctx.radio_queue && !radio_message_queue_empty(ctx.radio_queue));
+            uint8_t nss_high = (GPIOA->IDR & GPIO_PIN_4) ? 1 : 0;
+            debug_uart_log_spi_push_event("TICK_STATE", (uint8_t)ctx.state,
+                                           (uint16_t)((gps_has << 1) | radio_has),
+                                           (uint16_t)((ctx.irq_asserted << 1) | nss_high));
+        }
+    }
+#endif
+
     // ── Guard: Only Process if Idle ──
     // If we're mid-transaction (ACTIVE, HAVE_DATA, or UNCONFIGURED), don't start a new push.
     // Starting a push while a transaction is active would:
@@ -2174,7 +2239,7 @@ void spi_slave_tick(void) {
     // - Less frequent (1-10 Hz) compared to potential radio traffic bursts
     //
     // If GPS queue has data, prepare and push it immediately.
-    if (ctx.gps_queue && !gps_sample_queue_empty(ctx.gps_queue)) {
+    if (ctx.gps_fix_queue && !gps_fix_queue_empty(ctx.gps_fix_queue)) {
         spi_slave_prepare_push(PUSH_TYPE_GPS);
         return;  // Exit early - push GPS first, check radio on next tick
     }

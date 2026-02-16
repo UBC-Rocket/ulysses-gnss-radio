@@ -304,6 +304,10 @@ static void feed_byte(uint8_t b)
             }
         } else if (s_protocol_mode == SPI_MODE_PUSH) {
             /* PUSH MODE: Enqueue parsed fix if valid */
+#ifdef DEBUG
+            /* Log every NMEA sentence in push mode too */
+            debug_uart_log_gps_nmea((const char*)s_line);
+#endif
             if (lwgps_is_valid(&s_lwgps) == 1) {
                 populate_gps_fix(&s_parsed_fix, &s_lwgps);
                 if (s_gps_fix_queue != NULL) {
@@ -314,6 +318,11 @@ static void feed_byte(uint8_t b)
 #endif
                 }
             }
+#ifdef DEBUG
+            else {
+                debug_uart_log_gps_no_fix(s_lwgps.fix, s_lwgps.sats_in_use);
+            }
+#endif
         }
 
         /* Debug output to UART1 */

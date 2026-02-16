@@ -164,9 +164,17 @@ void DMA1_Channel1_IRQHandler(void)
 void DMA1_Channel2_3_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel2_3_IRQn 0 */
-  // SPI1 TX DMA uses channel 2 - we handle DMA ourselves
-  // (we don't care about TX completion - NSS rising edge handles transaction end)
-  return;  // Skip HAL handler - we use register-level DMA
+  /* Channel 2 (SPI1_TX): spi_slave.c sets TCIE=0, no interrupt generated.
+     Transaction end is detected via NSS rising edge (EXTI), not DMA TC. */
+
+  /* Channel 3 (USART1_TX): handle DMA completion for debug UART TX.
+     Must check GIF3 (not just TCIF3) because HAL_DMA_Start_IT enables
+     HT interrupt — if we only matched TC|TE, HTIF3 would never clear
+     and the ISR would re-enter infinitely. */
+  if (DMA1->ISR & DMA_ISR_GIF3) {
+    HAL_DMA_IRQHandler(&hdma_usart1_tx);
+  }
+  return;
   /* USER CODE END DMA1_Channel2_3_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_spi1_rx);
   HAL_DMA_IRQHandler(&hdma_usart1_tx);

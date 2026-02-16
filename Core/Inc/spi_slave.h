@@ -7,7 +7,7 @@
  *
  * Hardware Configuration:
  * - SPI1 on PA4(NSS), PA5(SCK), PA6(MISO), PA7(MOSI)
- * - IRQ output on PB2 (active high, directly driving GPIO for push mode)
+ * - IRQ output on PB1 (active high, directly driving GPIO for push mode)
  * - DMA1 Channel 1 (RX), Channel 2 (TX)
  * - EXTI line 4 for NSS transaction end detection
  *
@@ -22,6 +22,7 @@
 #include "protocol_config.h"
 #include "radio_queue.h"
 #include "gps_nema_queue.h"
+#include "gps_fix_queue.h"
 
 // ============================================================================
 // HARDWARE DEFINITIONS
@@ -58,9 +59,9 @@
 #define NSS_EXTI_LINE           4
 #define NSS_EXTI_PORT           0x00  // Port A = 0x00 (for EXTICR register)
 
-// IRQ Line for Push Mode (PB2)
+// IRQ Line for Push Mode (PB1)
 #define IRQ_GPIO_PORT           GPIOB
-#define IRQ_GPIO_PIN            GPIO_PIN_2
+#define IRQ_GPIO_PIN            GPIO_PIN_1
 
 // ============================================================================
 // STATE MACHINE
@@ -101,7 +102,8 @@ typedef struct {
     // ── Queue Pointers ──
     radio_message_queue_t *radio_queue;      // RX: messages received from radio UART5
     radio_message_queue_t *radio_tx_queue;   // TX: messages from SPI master to send over radio
-    gps_sample_queue_t *gps_queue;
+    gps_sample_queue_t *gps_queue;           // Pull mode: raw NMEA sentences (87 bytes)
+    gps_fix_queue_t *gps_fix_queue;          // Push mode: parsed GPS fixes (48 bytes)
 
     // ── Statistics & Diagnostics ──
     volatile uint32_t transactions_completed;
@@ -144,7 +146,7 @@ typedef struct {
  * @param radio_tx_queue Pointer to radio TX message queue (SPI master → radio UART5)
  * @param gps_queue Pointer to GPS sample queue
  */
-void spi_slave_init(radio_message_queue_t *radio_queue, radio_message_queue_t *radio_tx_queue, gps_sample_queue_t *gps_queue);
+void spi_slave_init(radio_message_queue_t *radio_queue, radio_message_queue_t *radio_tx_queue, gps_sample_queue_t *gps_queue, gps_fix_queue_t *gps_fix_queue);
 
 /**
  * @brief Set the protocol mode (pull or push)
@@ -209,7 +211,7 @@ void spi_slave_nss_exti_handler(void);
 /**
  * @brief Assert IRQ line to master (push mode)
  *
- * Sets PB2 high (active high) to signal the master that
+ * Sets PB1 high (active high) to signal the master that
  * the slave has data ready to send.
  */
 void spi_slave_assert_irq(void);
@@ -217,7 +219,7 @@ void spi_slave_assert_irq(void);
 /**
  * @brief Deassert IRQ line to master (push mode)
  *
- * Sets PB2 low (inactive) after transaction completes.
+ * Sets PB1 low (inactive) after transaction completes.
  */
 void spi_slave_deassert_irq(void);
 

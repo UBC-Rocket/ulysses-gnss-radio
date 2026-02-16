@@ -49,8 +49,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/spi_slave_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/radio_driver.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/gps.c
-    # ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/timing_utils.c  # Requires HAL_TIM - enable when needed
-
     # Debug UART support - injection and logging (conditional compilation via #ifdef DEBUG)
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/debug_uart.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/uart_callbacks.c

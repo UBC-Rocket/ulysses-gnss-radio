@@ -29,6 +29,24 @@ extern UART_HandleTypeDef huart1;
 /** Log message queue */
 static debug_log_queue_t log_queue;
 
+/** DMA TX in progress flag — set before HAL_UART_Transmit_DMA, cleared in TxCplt callback */
+static volatile bool s_dma_tx_busy = false;
+
+/** Tick when current DMA TX started (for timeout recovery) */
+static uint32_t s_dma_start_tick = 0;
+
+/** Diagnostic: number of DMA TX timeout recoveries */
+static uint32_t s_dma_tx_timeouts = 0;
+
+/** Diagnostic: number of messages skipped due to persistent DMA failures */
+static uint32_t s_dma_tx_skipped = 0;
+
+/** Consecutive DMA start failures on current tail message */
+static uint8_t s_dma_fail_count = 0;
+
+/** Max consecutive DMA failures before skipping a message */
+#define DMA_TX_MAX_RETRIES 5
+
 /** Radio message queue pointer (for injection) */
 static radio_message_queue_t *radio_queue = NULL;
 
@@ -95,11 +113,8 @@ void debug_uart_log_radio(const uint8_t *msg, uint16_t len)
 
 void debug_uart_log_gps_nmea(const char *nmea)
 {
-    if (nmea == NULL) {
-        return;
-    }
-
-    log_enqueue("[GPS NMEA] %s\r\n", nmea);
+    if (nmea == NULL) return;
+    log_enqueue("[GPS NMEA] %s", nmea);
 }
 
 void debug_uart_log_gps_fix(const gps_fix_t *fix)
@@ -128,6 +143,11 @@ void debug_uart_log_gps_fix(const gps_fix_t *fix)
                 fix->latitude, fix->longitude, (double)fix->altitude_msl,
                 (double)fix->ground_speed, (double)fix->course,
                 hrs, min, sec);
+}
+
+void debug_uart_log_gps_no_fix(uint8_t fix_status, uint8_t sats)
+{
+    log_enqueue("[GPS NOFIX] fix=%u sats=%u\r\n", fix_status, sats);
 }
 
 void debug_uart_log_spi_radio_tx(const uint8_t *msg, uint16_t len)
@@ -169,22 +189,55 @@ void debug_uart_log_spi_buflen(uint8_t count)
 
 void debug_uart_process_logs(void)
 {
-    // Process one message per call to avoid blocking too long
-    if (log_queue_empty()) {
-        return; // No messages to send
+    if (s_dma_tx_busy) {
+        /* Fast recovery: callback already ran, gState is READY */
+        if (huart1.gState == HAL_UART_STATE_READY) {
+            s_dma_tx_busy = false;
+        }
+        /* Timeout recovery: DMA chain stuck (gState still BUSY_TX).
+           Longest message (256 bytes) at 115200 baud = ~22ms.
+           50ms timeout gives generous margin. */
+        else if (HAL_GetTick() - s_dma_start_tick > 50) {
+            HAL_UART_AbortTransmit(&huart1);
+            log_queue.tail = (log_queue.tail + 1) % DEBUG_UART_LOG_QUEUE_DEPTH;
+            s_dma_tx_busy = false;
+            s_dma_tx_timeouts++;
+        }
+        return;
     }
 
-    // Get message from tail
+    if (log_queue_empty()) {
+        return;
+    }
+
     const char *msg = log_queue.messages[log_queue.tail];
     uint16_t msg_len = strlen(msg);
 
-    if (msg_len > 0) {
-        // Transmit message (blocking with 100ms timeout)
-        HAL_UART_Transmit(&huart1, (uint8_t*)msg, msg_len, 100);
+    if (msg_len == 0) {
+        log_queue.tail = (log_queue.tail + 1) % DEBUG_UART_LOG_QUEUE_DEPTH;
+        return;
     }
 
-    // Advance tail (circular)
+    s_dma_tx_busy = true;
+    s_dma_start_tick = HAL_GetTick();
+    if (HAL_UART_Transmit_DMA(&huart1, (const uint8_t *)msg, msg_len) != HAL_OK) {
+        s_dma_tx_busy = false;
+        s_dma_fail_count++;
+        if (s_dma_fail_count >= DMA_TX_MAX_RETRIES) {
+            /* Persistent failure — skip this message to unblock the queue */
+            log_queue.tail = (log_queue.tail + 1) % DEBUG_UART_LOG_QUEUE_DEPTH;
+            s_dma_fail_count = 0;
+            s_dma_tx_skipped++;
+        }
+    } else {
+        s_dma_fail_count = 0;
+    }
+}
+
+void debug_uart_dma_tx_cplt(void)
+{
     log_queue.tail = (log_queue.tail + 1) % DEBUG_UART_LOG_QUEUE_DEPTH;
+    s_dma_tx_busy = false;
 }
 
 /* ============================================================================
@@ -282,21 +335,24 @@ static void process_gps_injection(const uint8_t *payload, uint16_t len)
 
 static void log_enqueue(const char *format, ...)
 {
+    /* Reserve slot atomically — ISR callers and main loop callers can't collide */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
     if (log_queue_full()) {
-        return; // Drop message if queue full
+        __set_PRIMASK(primask);
+        return;
     }
 
-    // Format message into queue buffer
+    uint8_t slot = log_queue.head;
+    log_queue.head = (slot + 1) % DEBUG_UART_LOG_QUEUE_DEPTH;
+    __set_PRIMASK(primask);
+
+    /* Format into reserved slot — safe, no other writer can touch this slot */
     va_list args;
     va_start(args, format);
-    vsnprintf(log_queue.messages[log_queue.head],
-              DEBUG_UART_LOG_MSG_SIZE,
-              format,
-              args);
+    vsnprintf(log_queue.messages[slot], DEBUG_UART_LOG_MSG_SIZE, format, args);
     va_end(args);
-
-    // Advance head (circular)
-    log_queue.head = (log_queue.head + 1) % DEBUG_UART_LOG_QUEUE_DEPTH;
 }
 
 static bool log_queue_full(void)
@@ -352,8 +408,61 @@ static void format_hex_ascii(char *out, size_t out_size, const uint8_t *data, ui
 }
 
 /* ============================================================================
+ * Public API - Push Mode Debug Logging
+ * ============================================================================ */
+
+void debug_uart_log_spi_push_event(const char *event, uint8_t type,
+                                    uint16_t tx_sent, uint16_t rx_received)
+{
+    log_enqueue("[SPI PUSH] %s type=0x%02X tx=%u rx=%u\r\n",
+                event, type, tx_sent, rx_received);
+}
+
+void debug_uart_log_spi_idle_arm(void)
+{
+    log_enqueue("[SPI IDLE] Armed for master TX capture\r\n");
+}
+
+void debug_uart_log_spi_push_arm(uint8_t type, uint16_t len)
+{
+    log_enqueue("[SPI PUSH] Armed type=0x%02X len=%u\r\n", type, len);
+}
+
+/* ============================================================================
  * Public API - SPI Debug Logging
  * ============================================================================ */
+
+void debug_uart_log_spi_stats(uint32_t push_txns, uint32_t total_txns,
+                               uint32_t incomplete, uint32_t master_tx,
+                               uint32_t overruns)
+{
+    log_enqueue("[SPI STATS] push=%lu txn=%lu inc=%lu mtx=%lu ovr=%lu dto=%lu dsk=%lu\r\n",
+                (unsigned long)push_txns,
+                (unsigned long)total_txns,
+                (unsigned long)incomplete,
+                (unsigned long)master_tx,
+                (unsigned long)overruns,
+                (unsigned long)s_dma_tx_timeouts,
+                (unsigned long)s_dma_tx_skipped);
+}
+
+void debug_uart_log_spi_nss_event(bool falling, uint8_t state)
+{
+    log_enqueue("[SPI NSS] %s state=%u\r\n", falling ? "FALL" : "RISE", state);
+}
+
+void debug_uart_log_radio_diag(uint32_t cm_events, uint32_t bytes_fed,
+                                uint32_t msgs_enqueued, uint32_t uart_errors,
+                                uint32_t uart_cr1, uint32_t uart_cr3,
+                                uint32_t uart_isr, uint16_t dma_cndtr)
+{
+    log_enqueue("[RADIO DIAG] cm=%lu bytes=%lu msgs=%lu err=%lu\r\n"
+                "  CR1=%04lX CR3=%04lX ISR=%04lX CNDTR=%u\r\n",
+                (unsigned long)cm_events, (unsigned long)bytes_fed,
+                (unsigned long)msgs_enqueued, (unsigned long)uart_errors,
+                (unsigned long)uart_cr1, (unsigned long)uart_cr3,
+                (unsigned long)uart_isr, (unsigned)dma_cndtr);
+}
 
 void debug_uart_log_spi_arm(const spi_debug_capture_t *dbg)
 {

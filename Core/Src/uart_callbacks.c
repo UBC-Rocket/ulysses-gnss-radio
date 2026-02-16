@@ -188,6 +188,11 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     gps_uart_tx_cplt_callback(huart);
+#ifdef DEBUG
+    if (huart->Instance == USART1) {
+        debug_uart_dma_tx_cplt();
+    }
+#endif
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)

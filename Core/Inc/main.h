@@ -66,8 +66,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define FC_INT_Pin GPIO_PIN_1
+#define FC_INT_GPIO_Port GPIOB
 #define STAT_LEDR_Pin GPIO_PIN_2
 #define STAT_LEDR_GPIO_Port GPIOB
+#define GPS_RST_Pin GPIO_PIN_0
+#define GPS_RST_GPIO_Port GPIOD
 
 /* USER CODE BEGIN Private defines */
 

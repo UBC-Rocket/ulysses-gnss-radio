@@ -92,6 +92,28 @@ uint8_t radio_rx_count(void);
 radio_message_queue_t *radio_get_rx_queue(void);
 
 /* ============================================================================
+ * Diagnostics (DEBUG only)
+ * ============================================================================ */
+
+#ifdef DEBUG
+/**
+ * @brief Radio UART5 diagnostic counters
+ */
+typedef struct {
+    uint32_t cm_events;       /**< Character Match ISR invocations */
+    uint32_t bytes_fed;       /**< Total bytes processed through feed_byte */
+    uint32_t msgs_enqueued;   /**< Messages successfully enqueued */
+    uint32_t uart_errors;     /**< UART error callback invocations */
+} radio_diag_t;
+
+/**
+ * @brief Get radio diagnostic counters
+ * @return Snapshot of current counters
+ */
+radio_diag_t radio_get_diag(void);
+#endif
+
+/* ============================================================================
  * UART Callbacks - Wire these from stm32g0xx_it.c / uart_callbacks.c
  * ============================================================================ */
 
