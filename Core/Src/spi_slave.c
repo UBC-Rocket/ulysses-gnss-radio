@@ -1909,6 +1909,10 @@ void spi_slave_set_protocol_mode(spi_protocol_mode_t mode) {
     s_protocol_mode = mode;
 }
 
+spi_protocol_mode_t spi_slave_get_protocol_mode(void) {
+    return s_protocol_mode;
+}
+
 // ============================================================================
 // PUSH MODE IMPLEMENTATION
 // ============================================================================

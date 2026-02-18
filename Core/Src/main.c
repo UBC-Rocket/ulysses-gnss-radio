@@ -189,6 +189,11 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1, GPIO_PIN_SET);
+  // --- Null byte radio transmission in pull mode ---
+  static uint32_t last_null_tx_tick = 0;
+  static uint32_t last_telemetry_tx_tick = 0;
+  static bool telemetry_packet_sent = false;
+
   while (1)
   {
     /* USER CODE END WHILE */
@@ -212,10 +217,26 @@ int main(void)
               tx_len++;
           }
 
-          if (tx_len > 0) {
-              radio_send(tx_msg, tx_len);
-          }
+      if (tx_len > 0) {
+        radio_send(tx_msg, tx_len);
+        telemetry_packet_sent = true;
+        last_telemetry_tx_tick = HAL_GetTick();
       }
+    }
+
+    // --- Null byte transmission logic (pull mode only) ---
+    if (spi_slave_get_state() != SPI_STATE_UNCONFIGURED && spi_slave_get_protocol_mode() == SPI_MODE_PULL) {
+      uint32_t now = HAL_GetTick();
+      if (telemetry_packet_sent) {
+        last_telemetry_tx_tick = now;
+        telemetry_packet_sent = false;
+      }
+      if ((now - last_null_tx_tick) >= 10 && (now - last_telemetry_tx_tick) >= 10) {
+        uint8_t null_byte = 0x00;
+        radio_send(&null_byte, 1);
+        last_null_tx_tick = now;
+      }
+    }
 
 #ifdef DEBUG
       // Log SPI transaction debug data when new transaction detected

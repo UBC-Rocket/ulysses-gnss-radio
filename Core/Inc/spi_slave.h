@@ -157,6 +157,12 @@ void spi_slave_init(radio_message_queue_t *radio_queue, radio_message_queue_t *r
 void spi_slave_set_protocol_mode(spi_protocol_mode_t mode);
 
 /**
+ * @brief Get the current protocol mode (pull or push)
+ * @return spi_protocol_mode_t (SPI_MODE_PULL or SPI_MODE_PUSH)
+ */
+spi_protocol_mode_t spi_slave_get_protocol_mode(void);
+
+/**
  * @brief Get current state (for debugging)
  */
 spi_slave_state_t spi_slave_get_state(void);
