@@ -14,12 +14,12 @@ This board offloads GPS and radio communication from the main flight controller,
 
 ## Hardware
 
-- **MCU**: STM32G0B1CEU6 (Cortex-M0+, 128KB FLASH, 144KB RAM)
-- **Clock**: 16 MHz HSI (no PLL, low power configuration)
+- **MCU**: STM32G0B1CEU6 (Cortex-M0+, 128KB FLASH allocated / 512KB available, 144KB RAM)
+- **Clock**: 64 MHz (16 MHz HSI with PLL)
 - **Peripherals**:
   - SPI1 (slave mode) - Communication with flight controller
   - USART5 (57600 baud) - Radio transceiver interface
-  - USART6 (115200 baud) - GPS module interface
+  - USART6 (9600 baud) - GPS module interface
   - USART1 (115200 baud) - Debug console (ST-Link)
   - DMA1 (6 channels) - High-throughput peripheral data transfer
   - GPIO PB2 - IRQ output for push mode signaling
@@ -47,7 +47,7 @@ This board offloads GPS and radio communication from the main flight controller,
 - **Parsing**: lwgps library (NMEA 0183 standard)
 - **Supported sentences**: GPGGA, GPRMC, GPGSA, GPGSV (+ GLONASS variants)
 - **Dual queue system**:
-  - Raw NMEA queue: 10 samples × 87 bytes (pull mode)
+  - Raw NMEA double-buffer: 2 slots × 87 bytes (pull mode, latest sample only)
   - Parsed fix queue: 10 fixes × 48 bytes (push mode)
 - **Output formats**:
   - Pull mode: Raw NMEA sentences (up to 87 bytes)
@@ -85,7 +85,7 @@ USART1 serves dual purpose when compiled with DEBUG macro:
 ## Build System
 
 ### Prerequisites
-- CMake 3.16+
+- CMake 3.22+
 - Ninja build system
 - arm-none-eabi-gcc toolchain
 - Git (for lwgps submodule)
@@ -502,7 +502,7 @@ GPS update rate and constellation selection can be configured via the configurat
 **Solution**: Master must send 8-byte configuration frame on startup
 
 **Problem**: GPS not parsing NMEA sentences
-**Solution**: Check USART6 baud rate (should be 115200), verify GPS module TX connection
+**Solution**: Check USART6 baud rate (should be 9600), verify GPS module TX connection
 
 **Problem**: Radio messages not received
 **Solution**: Verify USART5 baud rate (57600), check radio module UART connection
