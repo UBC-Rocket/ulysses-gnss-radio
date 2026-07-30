@@ -75,6 +75,18 @@ static volatile bool s_at_active = false;
 /** HAL tick of the last AT opcode, for the watchdog above */
 static volatile uint32_t s_at_last_activity = 0;
 
+/**
+ * Set when the message parser must discard bytes until the next 0x00.
+ *
+ * Ending a session drops residue by snapshotting the DMA write position,
+ * but the modem keeps talking past that instant -- the echo of ATZ, a
+ * trailing OK, reboot chatter. That tail is ASCII, so it carries no 0x00
+ * and feed_byte() will not enqueue it; it just accumulates and gets
+ * prepended to the next genuine uplink frame, which then fails to decode.
+ * Resyncing on a real terminator is the only way to land on a boundary.
+ */
+static volatile bool s_resync = false;
+
 /** Raw bytes received from the modem, verbatim (no 0x00 splitting) */
 static uint8_t s_at_rx_ring[AT_RX_RING_SIZE];
 static volatile uint16_t s_at_rx_head = 0;  /* written by radio_at_poll */
@@ -105,6 +117,7 @@ void radio_init(radio_message_queue_t *queue)
     /* Reset state */
     s_last_pos = 0;
     s_msg_len = 0;
+    s_resync = false;
     memset(s_dma_buf, 0, sizeof(s_dma_buf));
     memset(s_msg_buf, 0, sizeof(s_msg_buf));
 
@@ -229,6 +242,13 @@ void radio_uart_error_callback(UART_HandleTypeDef *huart)
     /* Reset and restart circular DMA + CM */
     s_last_pos = 0;
     s_msg_len = 0;
+
+    /* A framing/overrun error lands mid-message: clearing s_msg_len drops
+     * the part already seen, but the remainder still arrives and would be
+     * enqueued as a truncated frame. Resync to the next terminator so the
+     * master never sees the fragment. */
+    s_resync = true;
+
     HAL_UART_Receive_DMA(&huart5, s_dma_buf, RADIO_DMA_BUF_SIZE);
     __HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT | DMA_IT_TC);
     __HAL_UART_ENABLE_IT(&huart5, UART_IT_CM);
@@ -283,6 +303,17 @@ static void process_dma_data(uint16_t new_pos)
 static void feed_byte(uint8_t b)
 {
     if (rx_queue == NULL) {
+        return;
+    }
+
+    /* Post-session resync: throw away the modem's AT tail up to and
+     * including the next terminator, so the first message we enqueue after
+     * a session begins at a true frame boundary. */
+    if (s_resync) {
+        if (b == 0x00) {
+            s_resync = false;
+            s_msg_len = 0;
+        }
         return;
     }
 
@@ -363,11 +394,16 @@ void radio_at_session_end(void)
 
     s_at_active = false;
 
-    /* Drop AT residue (a trailing "OK", the modem's reboot banner) so the
-     * message parser resumes on a clean boundary rather than prepending it
-     * to the next real radio message. */
+    /* Drop AT residue already in the DMA buffer... */
     s_last_pos = dma_write_pos();
     s_msg_len = 0;
+
+    /* ...and the tail still to arrive. The modem is mid-sentence (ATZ echo,
+     * a trailing OK, reboot chatter) and none of it contains a 0x00, so
+     * without this it would be prepended to the next real uplink frame and
+     * break its COBS decode. Costs at most one message: the discarded one
+     * is AT residue, not telemetry. */
+    s_resync = true;
 }
 
 bool radio_at_session_active(void)
