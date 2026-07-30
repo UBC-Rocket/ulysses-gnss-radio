@@ -19,6 +19,7 @@
  */
 
 #include "spi_slave.h"
+#include "radio_driver.h"  // AT passthrough session (opcodes 0x06-0x09)
 // #include "gps_driver.h"  // TODO: Add when GPS driver is implemented
 #include <string.h>
 #ifdef DEBUG
@@ -30,6 +31,9 @@
 // ============================================================================
 
 static spi_slave_context_t ctx;
+
+/** Bytes staged for CMD_RADIO_AT_RX in the RXNE ISR, committed at NSS rising */
+static uint8_t s_at_rx_staged = 0;
 
 /** Current protocol mode (set by configuration frame on startup) */
 static spi_protocol_mode_t s_protocol_mode = SPI_MODE_PULL;  // Default to pull mode
@@ -1254,6 +1258,17 @@ void spi_slave_spi1_irq_handler(void) {
             break;
         }
 
+        case CMD_RADIO_AT_RX: {
+            // Stage raw modem bytes as [LEN:1][DATA:AT_DATA_MAX].
+            // Peek only: the bytes are consumed at NSS rising once we know
+            // the master actually clocked the response out, matching how
+            // CMD_RADIO_RX_FIFO defers its queue pop.
+            radio_at_touch();
+            s_at_rx_staged = radio_at_peek(&ctx.tx_buf[CMD_OVERHEAD + 1], AT_DATA_MAX);
+            ctx.tx_buf[CMD_OVERHEAD] = s_at_rx_staged;
+            break;
+        }
+
         // ────────────────────────────────────
         // WRITE COMMANDS: Master sends data to slave
         // No action needed - RX DMA will capture payload
@@ -1262,6 +1277,42 @@ void spi_slave_spi1_irq_handler(void) {
         case CMD_RADIO_TX:
             // Payload will land at rx_buf[CMD_OVERHEAD..CMD_OVERHEAD+255]
             // via RX DMA. We'll process it in DMA TC ISR or EXTI ISR.
+            break;
+
+        case CMD_RADIO_AT_TX:
+            // Payload is [LEN:1][DATA:64]; handled at NSS rising once the
+            // full 70-byte transaction has landed.
+            radio_at_touch();
+            break;
+
+        // ────────────────────────────────────
+        // AT SESSION CONTROL: no payload at all
+        // Acted on here rather than at NSS rising -- there is nothing to
+        // wait for, and the modem's guard-time window starts the instant
+        // the master issues ENTER.
+        // ────────────────────────────────────
+
+        case CMD_RADIO_AT_ENTER:
+            // Drop telemetry the master queued before it suspended downlink;
+            // anything still pending would be written straight into the
+            // silence "+++" needs.
+            if (ctx.radio_tx_queue) {
+                radio_message_queue_init(ctx.radio_tx_queue);
+            }
+            s_at_rx_staged = 0;
+            radio_at_session_begin();
+            break;
+
+        case CMD_RADIO_AT_EXIT:
+            radio_at_session_end();
+            s_at_rx_staged = 0;
+            // Telemetry the master queued while the session ran is stale by
+            // now, and the modem is rebooting into its new config anyway --
+            // drop it rather than push it into a modem that is still coming
+            // back up.
+            if (ctx.radio_tx_queue) {
+                radio_message_queue_init(ctx.radio_tx_queue);
+            }
             break;
 
         default:
@@ -1710,6 +1761,32 @@ void spi_slave_nss_exti_handler(void) {
                 // else: payload_bytes = 0 (only dummy bytes received, master sent no payload)
             }
 
+            // ── Handle AT Passthrough Write ──
+            // CMD_RADIO_AT_TX is only 70 bytes total, so RX DMA never reaches
+            // its 260-byte terminal count and the DMA TC ISR never fires for
+            // it. NSS rising is the only place this gets processed.
+            if (ctx.current_cmd == CMD_RADIO_AT_TX && !ctx.payload_processed) {
+                uint16_t remaining = DMA1_Channel1->CNDTR;
+                uint16_t total_rx_bytes = (MAX_TRANSACTION_SIZE - 1) - remaining;
+                uint16_t payload_bytes = 0;
+
+                if (total_rx_bytes > PULL_DUMMY_BYTES) {
+                    payload_bytes = total_rx_bytes - PULL_DUMMY_BYTES;
+                }
+
+                if (payload_bytes >= PULL_AT_PAYLOAD) {
+                    // Payload is [LEN:1][DATA:64] at rx_buf[CMD_OVERHEAD].
+                    // A truncated write would corrupt the AT command stream
+                    // and desync the session, so only a complete one counts.
+                    uint8_t at_len = ctx.rx_buf[CMD_OVERHEAD];
+
+                    if (at_len > 0 && at_len <= AT_DATA_MAX) {
+                        radio_at_write(&ctx.rx_buf[CMD_OVERHEAD + 1], at_len);
+                    }
+                    ctx.payload_processed = true;
+                }
+            }
+
             // ── Handle Read Commands ──
             // For read commands, we already sent data to master via TX DMA.
             // Now pop the message from the queue since master has received it.
@@ -1748,6 +1825,15 @@ void spi_slave_nss_exti_handler(void) {
                         debug_uart_log_spi_gps_read(&ctx.tx_buf[CMD_OVERHEAD], PULL_GPS_PAYLOAD);
 #endif
                     }
+                } else if (ctx.current_cmd == CMD_RADIO_AT_RX) {
+                    // Commit the peek from the RXNE ISR only if the master
+                    // clocked the whole response out. On a short transaction
+                    // the bytes stay in the ring and the next read repeats
+                    // them -- losing AT reply bytes would desync the session.
+                    if (tx_sent >= PULL_AT_TOTAL) {
+                        radio_at_consume(s_at_rx_staged);
+                    }
+                    s_at_rx_staged = 0;
                 }
             }
 

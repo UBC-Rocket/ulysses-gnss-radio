@@ -26,6 +26,19 @@ typedef enum {
     CMD_RADIO_RXBUF_LEN  = 0x03,  // Read radio buffer message count
     CMD_RADIO_TX         = 0x04,  // Write radio message to transmit
     CMD_GPS_RX           = 0x05,  // Read raw NMEA sentence (pull mode)
+
+    // ── AT passthrough (0x06-0x09) ──
+    // Raw, unframed access to the modem serial (UART5) so the master can run
+    // an RFD900x AT command session (+++ / ATSn= / AT&W / ATZ) remotely.
+    //
+    // Normal radio traffic is null-terminated and the RX path splits it on
+    // 0x00, but AT commands and their replies ("OK\r\n", "905000\r\n") carry
+    // no NUL at all -- they need a byte pipe, not the message queues. These
+    // opcodes provide it, and are only meaningful between ENTER and EXIT.
+    CMD_RADIO_AT_ENTER   = 0x06,  // Begin AT session: silence UART5, capture raw
+    CMD_RADIO_AT_TX      = 0x07,  // Write raw bytes to modem (NO terminator)
+    CMD_RADIO_AT_RX      = 0x08,  // Read raw bytes received from modem
+    CMD_RADIO_AT_EXIT    = 0x09,  // End AT session: resume normal radio traffic
 } spi_pull_command_t;
 
 // ----------------------------------------------------------------------------
@@ -51,6 +64,17 @@ typedef enum {
 #define PULL_RADIO_TOTAL         (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_RADIO_PAYLOAD)  // 261
 #define PULL_GPS_TOTAL           (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_GPS_PAYLOAD)    // 92
 #define PULL_BUFLEN_TOTAL        (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_BUFLEN_PAYLOAD) // 6
+
+// AT passthrough transaction sizes.
+// Payload is length-prefixed because AT traffic has no in-band delimiter:
+// [LEN:1][DATA:AT_DATA_MAX]. LEN is the count of valid bytes in DATA; the
+// remainder is zero padding and must be ignored by both sides.
+#define AT_DATA_MAX              64
+#define PULL_AT_PAYLOAD          (1 + AT_DATA_MAX)                                         // 65
+#define PULL_AT_TOTAL            (PULL_CMD_BYTES + PULL_DUMMY_BYTES + PULL_AT_PAYLOAD)     // 70
+
+// ENTER/EXIT carry no payload -- the command byte alone is the whole message
+#define PULL_AT_CTRL_TOTAL       (PULL_CMD_BYTES + PULL_DUMMY_BYTES)                       // 5
 
 // Push mode transaction sizes (TYPE + PAYLOAD)
 #define PUSH_TYPE_BYTES          1

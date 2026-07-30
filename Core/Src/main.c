@@ -201,8 +201,15 @@ int main(void)
       // Push mode tick - check for pending data and assert IRQ if needed
       spi_slave_tick();
 
-      // Transmit radio messages from SPI master over UART5
-      if (!radio_message_queue_empty(&radio_tx_queue)) {
+      if (radio_at_session_active()) {
+          // AT passthrough: UART5 is a raw byte pipe to the modem for the
+          // duration. Normal radio TX stays parked -- radio_send() appends a
+          // 0x00 terminator, and any byte on the line breaks the silence
+          // window "+++" depends on.
+          radio_at_poll();   // drain modem replies into the raw RX ring
+          radio_at_flush();  // emit AT bytes staged by the SPI master
+      } else if (!radio_message_queue_empty(&radio_tx_queue)) {
+          // Transmit radio messages from SPI master over UART5
           uint8_t tx_msg[RADIO_MESSAGE_MAX_LEN];
           radio_message_dequeue(&radio_tx_queue, tx_msg);
 

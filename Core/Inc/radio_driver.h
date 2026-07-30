@@ -115,4 +115,103 @@ void radio_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size);
  */
 void radio_uart_error_callback(UART_HandleTypeDef *huart);
 
+/* ============================================================================
+ * AT Passthrough Session
+ * ============================================================================
+ *
+ * An AT session turns UART5 from a message pipe into a raw byte pipe so the
+ * SPI master can drive an RFD900x AT command session (+++ / ATSn= / AT&W).
+ *
+ * Two things change for the duration:
+ *
+ *  1. RX bypasses the message parser. Normal operation triggers solely on
+ *     Character Match (0x00) and splits the stream into null-terminated
+ *     messages -- but AT replies ("OK\r\n") contain no 0x00, so that
+ *     interrupt would never fire. During a session the CM handler stands
+ *     down and radio_at_poll() drains the circular DMA buffer by position
+ *     instead, feeding every byte verbatim into a raw ring.
+ *
+ *  2. TX bypasses radio_send(). That function appends a 0x00 terminator,
+ *     which would land inside the silence window "+++" depends on and break
+ *     command-mode entry. radio_at_write() emits bytes exactly as given.
+ *
+ * The DMA itself is never reconfigured -- it runs circular and untouched
+ * across the whole session; only the consumer changes.
+ */
+
+/**
+ * @brief Begin an AT session
+ *
+ * Discards any bytes in flight, resets the raw rings, and stops the message
+ * parser from consuming the DMA buffer. The caller is responsible for
+ * keeping UART5 otherwise silent (the modem needs ~1 s of quiet before it
+ * will accept "+++").
+ */
+void radio_at_session_begin(void);
+
+/**
+ * @brief End an AT session
+ *
+ * Drops any unread AT residue so it cannot be mistaken for a radio message,
+ * and hands the DMA buffer back to the null-terminated message parser.
+ */
+void radio_at_session_end(void);
+
+/**
+ * @brief Whether an AT session is currently open
+ */
+bool radio_at_session_active(void);
+
+/**
+ * @brief Note master activity, restarting the session watchdog
+ *
+ * Call on every AT opcode. A session left open strands the modem serial in
+ * raw mode and kills the downlink, so if the master goes away mid-session
+ * (reset, brownout, SPI fault) the session must not persist -- see
+ * RADIO_AT_SESSION_TIMEOUT_MS.
+ */
+void radio_at_touch(void);
+
+/**
+ * @brief Drain newly received UART5 bytes into the raw RX ring
+ *
+ * Call from the main loop while a session is open. Reads the DMA write
+ * position directly rather than waiting on Character Match.
+ */
+void radio_at_poll(void);
+
+/**
+ * @brief Copy pending raw RX bytes without consuming them
+ *
+ * Split from the consume step so the SPI slave can stage a response in its
+ * RXNE ISR and only commit once the master has actually clocked it out.
+ *
+ * @param dst Destination buffer
+ * @param max Maximum bytes to copy
+ * @return Number of bytes copied
+ */
+uint8_t radio_at_peek(uint8_t *dst, uint8_t max);
+
+/**
+ * @brief Consume n bytes previously reported by radio_at_peek()
+ */
+void radio_at_consume(uint8_t n);
+
+/**
+ * @brief Queue raw bytes for transmission to the modem (no terminator)
+ *
+ * Safe to call from interrupt context; bytes go out when radio_at_flush()
+ * runs from the main loop.
+ *
+ * @return true if all bytes were queued, false if the TX ring was full
+ */
+bool radio_at_write(const uint8_t *data, uint8_t len);
+
+/**
+ * @brief Transmit any bytes queued by radio_at_write()
+ *
+ * Call from the main loop while a session is open. Blocking UART writes.
+ */
+void radio_at_flush(void);
+
 #endif /* RADIO_DRIVER_H */

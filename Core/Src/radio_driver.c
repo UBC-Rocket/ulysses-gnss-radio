@@ -52,12 +52,46 @@ static uint16_t s_msg_len = 0;
 /** Driver initialized flag */
 static bool s_initialized = false;
 
+/* ── AT passthrough session state ── */
+
+/** Raw ring sizes (power of two; masked indexing) */
+#define AT_RX_RING_SIZE   256u
+#define AT_TX_RING_SIZE   256u
+
+/**
+ * Watchdog: end the session if the master stops issuing AT opcodes.
+ *
+ * The master polls for replies every few milliseconds throughout a session,
+ * so any gap this long means it is gone (reset, brownout, SPI fault). An
+ * abandoned session would leave the modem serial in raw mode with radio TX
+ * parked -- a silent, permanent loss of downlink. Recovering on our own is
+ * far better than waiting for a master that may never come back.
+ */
+#define RADIO_AT_SESSION_TIMEOUT_MS  10000u
+
+/** True while an AT session is open; the CM handler stands down */
+static volatile bool s_at_active = false;
+
+/** HAL tick of the last AT opcode, for the watchdog above */
+static volatile uint32_t s_at_last_activity = 0;
+
+/** Raw bytes received from the modem, verbatim (no 0x00 splitting) */
+static uint8_t s_at_rx_ring[AT_RX_RING_SIZE];
+static volatile uint16_t s_at_rx_head = 0;  /* written by radio_at_poll */
+static volatile uint16_t s_at_rx_tail = 0;  /* read by radio_at_peek/consume */
+
+/** Raw bytes staged for the modem, written out by radio_at_flush */
+static uint8_t s_at_tx_ring[AT_TX_RING_SIZE];
+static volatile uint16_t s_at_tx_head = 0;  /* written by radio_at_write (ISR) */
+static volatile uint16_t s_at_tx_tail = 0;  /* read by radio_at_flush */
+
 /* ============================================================================
  * Forward Declarations
  * ============================================================================ */
 
 static void process_dma_data(uint16_t new_pos);
 static void feed_byte(uint8_t b);
+static uint16_t dma_write_pos(void);
 
 /* ============================================================================
  * Public API
@@ -173,6 +207,13 @@ void radio_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size)
         return;
     }
 
+    /* During an AT session radio_at_poll() owns s_last_pos and the DMA
+     * buffer. A stray 0x00 in the modem's reply must not let the message
+     * parser consume bytes out from under it. */
+    if (s_at_active) {
+        return;
+    }
+
     process_dma_data(Size);
 }
 
@@ -270,5 +311,170 @@ static void feed_byte(uint8_t b)
             s_msg_len = 0;
             memset(s_msg_buf, 0, sizeof(s_msg_buf));
         }
+    }
+}
+
+/**
+ * @brief Current DMA write position in the circular RX buffer
+ *
+ * CNDTR counts down from RADIO_DMA_BUF_SIZE as bytes land, so the write
+ * index is the buffer size minus what remains.
+ */
+static uint16_t dma_write_pos(void)
+{
+    return (uint16_t)(RADIO_DMA_BUF_SIZE - __HAL_DMA_GET_COUNTER(huart5.hdmarx));
+}
+
+/* ============================================================================
+ * AT Passthrough Session
+ * ============================================================================ */
+
+void radio_at_session_begin(void)
+{
+    if (!s_initialized) {
+        return;
+    }
+
+    /* Skip past anything already in the DMA buffer: bytes that arrived
+     * before the session belong to normal radio traffic, not to the AT
+     * exchange, and must not be parsed as a reply. */
+    s_last_pos = dma_write_pos();
+    s_msg_len = 0;
+
+    s_at_rx_head = 0;
+    s_at_rx_tail = 0;
+    s_at_tx_head = 0;
+    s_at_tx_tail = 0;
+
+    s_at_last_activity = HAL_GetTick();
+    s_at_active = true;
+}
+
+void radio_at_touch(void)
+{
+    s_at_last_activity = HAL_GetTick();
+}
+
+void radio_at_session_end(void)
+{
+    if (!s_initialized) {
+        return;
+    }
+
+    s_at_active = false;
+
+    /* Drop AT residue (a trailing "OK", the modem's reboot banner) so the
+     * message parser resumes on a clean boundary rather than prepending it
+     * to the next real radio message. */
+    s_last_pos = dma_write_pos();
+    s_msg_len = 0;
+}
+
+bool radio_at_session_active(void)
+{
+    return s_at_active;
+}
+
+void radio_at_poll(void)
+{
+    if (!s_initialized || !s_at_active) {
+        return;
+    }
+
+    /* Unsigned subtraction, so this stays correct across HAL tick rollover */
+    if ((HAL_GetTick() - s_at_last_activity) > RADIO_AT_SESSION_TIMEOUT_MS) {
+        radio_at_session_end();
+        return;
+    }
+
+    uint16_t current = dma_write_pos();
+    uint16_t last = s_last_pos;
+
+    while (last != current) {
+        uint16_t next_head = (uint16_t)((s_at_rx_head + 1u) & (AT_RX_RING_SIZE - 1u));
+
+        if (next_head == s_at_rx_tail) {
+            /* Ring full: the master is not draining fast enough. Drop the
+             * new byte rather than the older ones -- the AT engine is
+             * matching a reply prefix, so the head of the stream is what
+             * carries meaning. */
+            break;
+        }
+
+        s_at_rx_ring[s_at_rx_head] = s_dma_buf[last];
+        s_at_rx_head = next_head;
+
+        last = (uint16_t)((last + 1u) & (RADIO_DMA_BUF_SIZE - 1u));
+    }
+
+    s_last_pos = last;
+}
+
+uint8_t radio_at_peek(uint8_t *dst, uint8_t max)
+{
+    if (dst == NULL) {
+        return 0;
+    }
+
+    uint16_t tail = s_at_rx_tail;
+    uint8_t n = 0;
+
+    while (n < max && tail != s_at_rx_head) {
+        dst[n++] = s_at_rx_ring[tail];
+        tail = (uint16_t)((tail + 1u) & (AT_RX_RING_SIZE - 1u));
+    }
+
+    return n;
+}
+
+void radio_at_consume(uint8_t n)
+{
+    for (uint8_t i = 0; i < n; i++) {
+        if (s_at_rx_tail == s_at_rx_head) {
+            return;
+        }
+        s_at_rx_tail = (uint16_t)((s_at_rx_tail + 1u) & (AT_RX_RING_SIZE - 1u));
+    }
+}
+
+bool radio_at_write(const uint8_t *data, uint8_t len)
+{
+    if (data == NULL) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < len; i++) {
+        uint16_t next_head = (uint16_t)((s_at_tx_head + 1u) & (AT_TX_RING_SIZE - 1u));
+
+        if (next_head == s_at_tx_tail) {
+            return false; /* ring full; caller sees a short write */
+        }
+
+        s_at_tx_ring[s_at_tx_head] = data[i];
+        s_at_tx_head = next_head;
+    }
+
+    return true;
+}
+
+void radio_at_flush(void)
+{
+    if (!s_initialized || !s_at_active) {
+        return;
+    }
+
+    /* Snapshot head once: radio_at_write() may append from the SPI ISR
+     * while this loop runs, and those bytes simply go out next pass. */
+    uint16_t head = s_at_tx_head;
+
+    while (s_at_tx_tail != head) {
+        uint8_t byte = s_at_tx_ring[s_at_tx_tail];
+
+        /* No terminator, no framing -- exactly the bytes the master gave us */
+        if (HAL_UART_Transmit(&huart5, &byte, 1, 100) != HAL_OK) {
+            return; /* leave the rest queued for the next pass */
+        }
+
+        s_at_tx_tail = (uint16_t)((s_at_tx_tail + 1u) & (AT_TX_RING_SIZE - 1u));
     }
 }
