@@ -167,6 +167,17 @@ void debug_uart_log_spi_buflen(uint8_t count)
     log_enqueue("[SPI->M] BufLen: %u\r\n", count);
 }
 
+void debug_uart_log_rx_discard(const uint8_t *msg, uint16_t len)
+{
+    if (msg == NULL || len == 0) {
+        return;
+    }
+
+    char hex_ascii[128];
+    format_hex_ascii(hex_ascii, sizeof(hex_ascii), msg, len);
+    log_enqueue("[RX DROP] %s\r\n", hex_ascii);
+}
+
 void debug_uart_log_at_session(bool begin)
 {
     log_enqueue("[AT] session %s\r\n", begin ? "begin" : "end");

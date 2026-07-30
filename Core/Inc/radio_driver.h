@@ -115,6 +115,16 @@ void radio_rx_event_callback(UART_HandleTypeDef *huart, uint16_t Size);
  */
 void radio_uart_error_callback(UART_HandleTypeDef *huart);
 
+/**
+ * @brief Discard a partial message that has stalled without its terminator
+ *
+ * Call regularly from the main loop. The parser splits the radio stream on
+ * 0x00 and otherwise waits forever, so a stray byte that never gets a
+ * terminator is not dropped -- it lingers and is prepended to the next
+ * genuine frame, breaking its decode. This expires that debris.
+ */
+void radio_rx_idle_check(void);
+
 /* ============================================================================
  * AT Passthrough Session
  * ============================================================================

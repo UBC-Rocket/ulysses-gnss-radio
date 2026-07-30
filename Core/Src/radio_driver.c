@@ -87,6 +87,25 @@ static volatile uint32_t s_at_last_activity = 0;
  */
 static volatile bool s_resync = false;
 
+/**
+ * Discard a partial message that has stalled without its terminator.
+ *
+ * The parser splits on 0x00 and waits indefinitely otherwise, so a stray
+ * byte with no terminator behind it is not dropped -- it sits in the
+ * accumulator and is prepended to the next genuine frame, whenever that
+ * arrives. Observed 2026-07-30: "++++++" leaked onto the air from a ground
+ * modem still in transparent mode, waited ten minutes, then fused with an
+ * uplink command and broke its COBS decode.
+ *
+ * A real frame arrives as one burst; anything still incomplete after this
+ * long is debris. Generous enough not to truncate a slow frame at low air
+ * rates (a 256-byte message is ~500 ms even at 4 kbps).
+ */
+#define RADIO_MSG_IDLE_TIMEOUT_MS  1000u
+
+/** HAL tick of the last byte accumulated into s_msg_buf */
+static volatile uint32_t s_msg_last_tick = 0;
+
 /** Raw bytes received from the modem, verbatim (no 0x00 splitting) */
 static uint8_t s_at_rx_ring[AT_RX_RING_SIZE];
 static volatile uint16_t s_at_rx_head = 0;  /* written by radio_at_poll */
@@ -337,6 +356,7 @@ static void feed_byte(uint8_t b)
         if (s_msg_len < RADIO_MAX_MESSAGE_LEN) {
             s_msg_buf[s_msg_len] = b;
             s_msg_len++;
+            s_msg_last_tick = HAL_GetTick();
         } else {
             /* Buffer overflow - discard and start over */
             s_msg_len = 0;
@@ -359,6 +379,22 @@ static uint16_t dma_write_pos(void)
 /* ============================================================================
  * AT Passthrough Session
  * ============================================================================ */
+
+void radio_rx_idle_check(void)
+{
+    if (!s_initialized || s_at_active || s_msg_len == 0) {
+        return;
+    }
+
+    /* Unsigned subtraction, so this stays correct across HAL tick rollover */
+    if ((HAL_GetTick() - s_msg_last_tick) > RADIO_MSG_IDLE_TIMEOUT_MS) {
+#ifdef DEBUG
+        debug_uart_log_rx_discard(s_msg_buf, s_msg_len);
+#endif
+        s_msg_len = 0;
+        memset(s_msg_buf, 0, sizeof(s_msg_buf));
+    }
+}
 
 void radio_at_session_begin(void)
 {

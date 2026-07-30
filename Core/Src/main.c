@@ -201,6 +201,10 @@ int main(void)
       // Push mode tick - check for pending data and assert IRQ if needed
       spi_slave_tick();
 
+      // Expire a stalled partial radio message before it can fuse with the
+      // next genuine frame
+      radio_rx_idle_check();
+
       if (radio_at_session_active()) {
           // AT passthrough: UART5 is a raw byte pipe to the modem for the
           // duration. Normal radio TX stays parked -- radio_send() appends a
