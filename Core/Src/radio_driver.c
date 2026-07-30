@@ -379,6 +379,10 @@ void radio_at_session_begin(void)
 
     s_at_last_activity = HAL_GetTick();
     s_at_active = true;
+
+#ifdef DEBUG
+    debug_uart_log_at_session(true);
+#endif
 }
 
 void radio_at_touch(void)
@@ -404,6 +408,10 @@ void radio_at_session_end(void)
      * break its COBS decode. Costs at most one message: the discarded one
      * is AT residue, not telemetry. */
     s_resync = true;
+
+#ifdef DEBUG
+    debug_uart_log_at_session(false);
+#endif
 }
 
 bool radio_at_session_active(void)
@@ -426,6 +434,11 @@ void radio_at_poll(void)
     uint16_t current = dma_write_pos();
     uint16_t last = s_last_pos;
 
+#ifdef DEBUG
+    uint8_t seen[64];
+    uint16_t seen_n = 0;
+#endif
+
     while (last != current) {
         uint16_t next_head = (uint16_t)((s_at_rx_head + 1u) & (AT_RX_RING_SIZE - 1u));
 
@@ -440,10 +453,22 @@ void radio_at_poll(void)
         s_at_rx_ring[s_at_rx_head] = s_dma_buf[last];
         s_at_rx_head = next_head;
 
+#ifdef DEBUG
+        if (seen_n < sizeof(seen)) {
+            seen[seen_n++] = s_dma_buf[last];
+        }
+#endif
+
         last = (uint16_t)((last + 1u) & (RADIO_DMA_BUF_SIZE - 1u));
     }
 
     s_last_pos = last;
+
+#ifdef DEBUG
+    if (seen_n > 0) {
+        debug_uart_log_at_rx(seen, seen_n);
+    }
+#endif
 }
 
 uint8_t radio_at_peek(uint8_t *dst, uint8_t max)
@@ -502,15 +527,24 @@ void radio_at_flush(void)
     /* Snapshot head once: radio_at_write() may append from the SPI ISR
      * while this loop runs, and those bytes simply go out next pass. */
     uint16_t head = s_at_tx_head;
+    uint8_t burst[AT_TX_RING_SIZE];
+    uint16_t n = 0;
 
-    while (s_at_tx_tail != head) {
-        uint8_t byte = s_at_tx_ring[s_at_tx_tail];
-
-        /* No terminator, no framing -- exactly the bytes the master gave us */
-        if (HAL_UART_Transmit(&huart5, &byte, 1, 100) != HAL_OK) {
-            return; /* leave the rest queued for the next pass */
-        }
-
+    while (s_at_tx_tail != head && n < sizeof(burst)) {
+        burst[n++] = s_at_tx_ring[s_at_tx_tail];
         s_at_tx_tail = (uint16_t)((s_at_tx_tail + 1u) & (AT_TX_RING_SIZE - 1u));
     }
+
+    if (n == 0) {
+        return;
+    }
+
+    /* One contiguous write. "+++" has to reach the modem as an unbroken
+     * burst -- three separate transmits would put gaps between the
+     * characters, and no terminator or framing may be added around it. */
+    HAL_UART_Transmit(&huart5, burst, n, 100);
+
+#ifdef DEBUG
+    debug_uart_log_at_tx(burst, n);
+#endif
 }

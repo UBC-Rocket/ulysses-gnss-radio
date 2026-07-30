@@ -175,6 +175,39 @@ void debug_uart_log_spi_gps_read(const uint8_t *data, uint16_t len);
 void debug_uart_log_spi_buflen(uint8_t count);
 
 /**
+ * @brief Log AT session state change
+ *
+ * Formats and enqueues message: "[AT] session begin" / "[AT] session end"
+ *
+ * @param begin true for session start, false for session end
+ */
+void debug_uart_log_at_session(bool begin);
+
+/**
+ * @brief Log raw bytes written to the modem during an AT session
+ *
+ * Formats and enqueues message: "[AT TX] <hex> (<ASCII>)". This is the
+ * decisive trace for command-mode entry: "+++" must appear here as
+ * 2B 2B 2B and nothing else may precede it inside the guard window.
+ *
+ * @param data Bytes handed to UART5
+ * @param len Byte count
+ */
+void debug_uart_log_at_tx(const uint8_t *data, uint16_t len);
+
+/**
+ * @brief Log raw bytes received from the modem during an AT session
+ *
+ * Formats and enqueues message: "[AT RX] <hex> (<ASCII>)". Silence here
+ * after an "[AT TX] 2B 2B 2B" means the modem never answered; bytes that
+ * never reach the master instead point at the SPI readback path.
+ *
+ * @param data Bytes drained from UART5
+ * @param len Byte count
+ */
+void debug_uart_log_at_rx(const uint8_t *data, uint16_t len);
+
+/**
  * @brief Process and transmit pending log messages
  *
  * Dequeues and transmits log messages via UART1 TX (blocking).
