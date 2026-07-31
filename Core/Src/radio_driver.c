@@ -88,14 +88,20 @@ static volatile uint32_t s_at_last_activity = 0;
 static volatile bool s_resync = false;
 
 /**
- * Discard a partial message that has stalled without its terminator.
+ * Discard received bytes that have stalled without a terminator.
  *
- * The parser splits on 0x00 and waits indefinitely otherwise, so a stray
- * byte with no terminator behind it is not dropped -- it sits in the
- * accumulator and is prepended to the next genuine frame, whenever that
- * arrives. Observed 2026-07-30: "++++++" leaked onto the air from a ground
- * modem still in transparent mode, waited ten minutes, then fused with an
- * uplink command and broke its COBS decode.
+ * The stream is split on 0x00 and waits indefinitely otherwise, so stray
+ * bytes with no terminator behind them are never dropped -- they are
+ * prepended to the next genuine frame, whenever that arrives. Observed
+ * 2026-07-30: the ground station's AT sessions put "++++++" on the air, it
+ * waited minutes, then fused with an uplink command and broke its COBS
+ * decode.
+ *
+ * Note where the debris actually sits. Character Match fires only on 0x00,
+ * so until a terminator arrives process_dma_data() never runs and the bytes
+ * are still in the DMA buffer -- s_msg_buf is empty and s_msg_len is 0.
+ * Watching the accumulator alone therefore sees nothing at all; the DMA
+ * write position is what has to be checked.
  *
  * A real frame arrives as one burst; anything still incomplete after this
  * long is debris. Generous enough not to truncate a slow frame at low air
@@ -103,8 +109,9 @@ static volatile bool s_resync = false;
  */
 #define RADIO_MSG_IDLE_TIMEOUT_MS  1000u
 
-/** HAL tick of the last byte accumulated into s_msg_buf */
-static volatile uint32_t s_msg_last_tick = 0;
+/** Set while unterminated bytes are outstanding, with the tick we noticed */
+static volatile bool s_rx_stalled = false;
+static volatile uint32_t s_rx_stall_since = 0;
 
 /** Raw bytes received from the modem, verbatim (no 0x00 splitting) */
 static uint8_t s_at_rx_ring[AT_RX_RING_SIZE];
@@ -356,7 +363,6 @@ static void feed_byte(uint8_t b)
         if (s_msg_len < RADIO_MAX_MESSAGE_LEN) {
             s_msg_buf[s_msg_len] = b;
             s_msg_len++;
-            s_msg_last_tick = HAL_GetTick();
         } else {
             /* Buffer overflow - discard and start over */
             s_msg_len = 0;
@@ -382,18 +388,51 @@ static uint16_t dma_write_pos(void)
 
 void radio_rx_idle_check(void)
 {
-    if (!s_initialized || s_at_active || s_msg_len == 0) {
+    if (!s_initialized || s_at_active) {
+        return;
+    }
+
+    uint16_t pos = dma_write_pos();
+
+    /* Two places bytes can be stranded without a terminator: still in the
+     * DMA buffer because Character Match never fired (the common case --
+     * CM only triggers on 0x00), or already parsed into the accumulator
+     * because a terminator arrived mid-span and more followed it. */
+    uint16_t dma_pending = (uint16_t)((pos - s_last_pos) & (RADIO_DMA_BUF_SIZE - 1u));
+
+    if (dma_pending == 0 && s_msg_len == 0) {
+        s_rx_stalled = false; /* parser is on a clean boundary */
+        return;
+    }
+
+    uint32_t now = HAL_GetTick();
+
+    if (!s_rx_stalled) {
+        s_rx_stalled = true;
+        s_rx_stall_since = now;
         return;
     }
 
     /* Unsigned subtraction, so this stays correct across HAL tick rollover */
-    if ((HAL_GetTick() - s_msg_last_tick) > RADIO_MSG_IDLE_TIMEOUT_MS) {
-#ifdef DEBUG
-        debug_uart_log_rx_discard(s_msg_buf, s_msg_len);
-#endif
-        s_msg_len = 0;
-        memset(s_msg_buf, 0, sizeof(s_msg_buf));
+    if ((now - s_rx_stall_since) <= RADIO_MSG_IDLE_TIMEOUT_MS) {
+        return;
     }
+
+#ifdef DEBUG
+    debug_uart_log_rx_discard(dma_pending, s_msg_len);
+#endif
+
+    /* Mask Character Match while resetting: the handler owns s_last_pos and
+     * could otherwise consume the span between our read and our write. */
+    __HAL_UART_DISABLE_IT(&huart5, UART_IT_CM);
+
+    s_last_pos = dma_write_pos();
+    s_msg_len = 0;
+    memset(s_msg_buf, 0, sizeof(s_msg_buf));
+
+    __HAL_UART_ENABLE_IT(&huart5, UART_IT_CM);
+
+    s_rx_stalled = false;
 }
 
 void radio_at_session_begin(void)

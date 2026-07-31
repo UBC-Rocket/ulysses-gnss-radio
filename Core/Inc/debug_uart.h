@@ -175,16 +175,16 @@ void debug_uart_log_spi_gps_read(const uint8_t *data, uint16_t len);
 void debug_uart_log_spi_buflen(uint8_t count);
 
 /**
- * @brief Log a partial radio message discarded by the idle timeout
+ * @brief Log unterminated radio bytes discarded by the idle timeout
  *
- * Formats and enqueues message: "[RX DROP] <hex> (<ASCII>)". Seeing this
+ * Formats and enqueues message: "[RX DROP] dma=<n> msg=<m>". Seeing this
  * means stray bytes reached the modem serial without a terminator and were
  * expired before they could corrupt the next frame.
  *
- * @param msg Pointer to the discarded partial message
- * @param len Length in bytes
+ * @param dma_bytes Bytes stranded in the DMA buffer (no Character Match yet)
+ * @param msg_len Bytes stranded in the message accumulator
  */
-void debug_uart_log_rx_discard(const uint8_t *msg, uint16_t len);
+void debug_uart_log_rx_discard(uint16_t dma_bytes, uint16_t msg_len);
 
 /**
  * @brief Log AT session state change
